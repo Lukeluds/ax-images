@@ -1,7 +1,9 @@
 # Claude Code Agent Image (`agents/claude-code`)
 
-Launcher (`ax-harness`) for running headless [Claude Code](https://claude.com/claude-code)
-tasks under the AX in-container wrapper contract.
+Pure mount-ready container image and launcher (`ax-harness`) for running
+headless [Claude Code](https://claude.com/claude-code) tasks under the AX
+in-container wrapper contract. Contains no AX runner binary (`ax-task-runner` is
+mounted read-only by AX at `/opt/ax`).
 
 ## Launcher Contract (`/usr/local/bin/ax-harness`)
 
@@ -15,17 +17,19 @@ invokes `/usr/local/bin/ax-harness` with `/workspace` as the working directory:
   - Lists → `--flag=elem` repeated per item
   - Objects → `--flag=<compact JSON>` (e.g. `settings`)
 
-## Runtime Installation
+## Runtime vs. Pre-Installed Builds
 
-If `claude` is not already present on `PATH`, `ax-harness` installs it on
-startup using Anthropic's official installer (`https://claude.ai/install.sh`,
-version controlled by `CLAUDE_CODE_VERSION`, defaulting to `stable`). In
-egress-restricted sandboxes, runtime installation requires outbound HTTPS (`443`)
-access to `claude.ai` and `downloads.claude.ai` unless `claude` was pre-installed
-at image build time.
+- **Default (`PREINSTALL_CLAUDE=false`):** Ships only Debian packages and `ax-harness` (no `claude` binary inside the image). When `claude` is missing at container startup, `ax-harness` installs `CLAUDE_CODE_VERSION` (default `stable`) via `https://claude.ai/install.sh`. Egress-restricted sandboxes using this mode must allow outbound HTTPS (`443`) to `claude.ai` and `downloads.claude.ai`.
+- **Optional pre-installed build (`--build-arg PREINSTALL_CLAUDE=true`):** Installs `claude` during `docker build` for local or airgapped E2E environments where internet egress is blocked.
 
-## Unit Test
+## Local Build & Test
 
 ```bash
 ./agents/claude-code/test_harness.sh
+
+# Default runtime-install image (no claude binary inside):
+docker build -t ax-claude-code:dev ./agents/claude-code
+
+# Optional pre-installed local build:
+docker build --build-arg PREINSTALL_CLAUDE=true -t ax-claude-code:prebaked ./agents/claude-code
 ```
