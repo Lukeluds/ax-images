@@ -66,7 +66,7 @@ resp=$(curl -fsS -X POST "${BASE}/v1/messages" \
   -d '{"model":"claude-mock","stream":false,"messages":[{"role":"user","content":"hi"}]}')
 python3 - "${resp}" << 'EOF'
 import json, sys
-d = json.load(sys.stdin) if len(sys.argv) < 2 else json.loads(sys.argv[1])
+d = json.loads(sys.argv[1])
 assert d["content"][0]["text"] == "MOCK_OK"
 EOF
 
@@ -117,9 +117,96 @@ for r in log:
     assert "authorization" not in r["headers"]
 EOF
 
-# 8. Reset clears request log
+# 8. Config validation & FAULT modes (429, 500, slow, truncated_sse)
+bad_cfg=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${BASE}/_mock/config" \
+  -H "content-type: application/json" -d '{"fault":"unknown"}')
+test "${bad_cfg}" = "400"
+
+curl -fsS -X POST "${BASE}/_mock/config" -H "content-type: application/json" -d '{"fault":"429"}' >/dev/null
+headers_429="$(mktemp)"
+code=$(curl -s -D "${headers_429}" -o /dev/null -w "%{http_code}" -X POST "${BASE}/v1/messages" \
+  -H "x-api-key: ${EXPECTED_KEY}" -H "content-type: application/json" -d '{"messages":[{"role":"user","content":"hi"}]}')
+test "${code}" = "429"
+python3 - "${headers_429}" << 'EOF'
+import sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    raw = f.read().lower()
+assert "retry-after: 1" in raw, raw
+EOF
+rm -f "${headers_429}"
+
+curl -fsS -X POST "${BASE}/_mock/config" -H "content-type: application/json" -d '{"fault":"500"}' >/dev/null
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${BASE}/v1/messages" \
+  -H "x-api-key: ${EXPECTED_KEY}" -H "content-type: application/json" -d '{"messages":[{"role":"user","content":"hi"}]}')
+test "${code}" = "500"
+
+curl -fsS -X POST "${BASE}/_mock/config" -H "content-type: application/json" -d '{"fault":"slow","slow_delay":0.15}' >/dev/null
+slow_resp=$(curl -fsS -X POST "${BASE}/v1/messages" \
+  -H "x-api-key: ${EXPECTED_KEY}" -H "content-type: application/json" -d '{"messages":[{"role":"user","content":"hi"}]}')
+python3 - "${slow_resp}" << 'EOF'
+import json, sys
+assert json.loads(sys.argv[1])["content"][0]["text"] == "MOCK_OK"
+EOF
+
+curl -fsS -X POST "${BASE}/_mock/config" -H "content-type: application/json" -d '{"fault":"truncated_sse"}' >/dev/null
+trunc=$(curl -s -X POST "${BASE}/v1/messages" \
+  -H "x-api-key: ${EXPECTED_KEY}" -H "content-type: application/json" -d '{"stream":true,"messages":[{"role":"user","content":"hi"}]}')
+python3 - "${trunc}" << 'EOF'
+import sys
+d = sys.argv[1]
+assert "event: message_start" in d
+assert "event: message_stop" not in d
+EOF
+
+# 9. Scripted Write tool_use (turn 1 -> tool_use, turn 2 with tool_result -> MOCK_OK)
+curl -fsS -X POST "${BASE}/_mock/reset" >/dev/null
+curl -fsS -X POST "${BASE}/_mock/config" -H "content-type: application/json" \
+  -d '{"tool_write_path":"/workspace/out.txt","tool_write_content":"HELLO_TOOL"}' >/dev/null
+
+t1=$(curl -fsS -X POST "${BASE}/v1/messages" \
+  -H "x-api-key: ${EXPECTED_KEY}" -H "content-type: application/json" \
+  -d '{"model":"claude-mock","stream":true,"tools":[{"name":"Write"}],"messages":[{"role":"user","content":"write file"}]}')
+python3 - "${t1}" << 'EOF'
+import sys
+d = sys.argv[1]
+assert "tool_use" in d
+assert "/workspace/out.txt" in d
+assert "HELLO_TOOL" in d
+EOF
+
+t1_json=$(curl -fsS -X POST "${BASE}/v1/messages" \
+  -H "x-api-key: ${EXPECTED_KEY}" -H "content-type: application/json" \
+  -d '{"model":"claude-mock","stream":false,"tools":[{"name":"Write"}],"messages":[{"role":"user","content":"write file"}]}')
+python3 - "${t1_json}" << 'EOF'
+import json, sys
+d = json.loads(sys.argv[1])
+assert d["stop_reason"] == "tool_use"
+assert d["content"][0]["name"] == "Write"
+assert d["content"][0]["input"]["file_path"] == "/workspace/out.txt"
+EOF
+
+t2=$(curl -fsS -X POST "${BASE}/v1/messages" \
+  -H "x-api-key: ${EXPECTED_KEY}" -H "content-type: application/json" \
+  -d '{"model":"claude-mock","stream":true,"tools":[{"name":"Write"}],"messages":[{"role":"user","content":"write file"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_mock_01","name":"Write","input":{"file_path":"/workspace/out.txt","content":"HELLO_TOOL"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_mock_01","content":"ok"}]}]}')
+python3 - "${t2}" << 'EOF'
+import sys
+d = sys.argv[1]
+assert "MOCK_OK" in d
+assert "event: message_stop" in d
+EOF
+
+# 10. Reset clears request log AND restores startup config (no tool_use or fault)
 curl -fsS -X POST "${BASE}/_mock/reset" >/dev/null
 after=$(curl -fsS "${BASE}/_mock/requests")
 test "${after}" = "[]"
+normal=$(curl -fsS -X POST "${BASE}/v1/messages" \
+  -H "x-api-key: ${EXPECTED_KEY}" -H "content-type: application/json" \
+  -d '{"model":"claude-mock","stream":false,"tools":[{"name":"Write"}],"messages":[{"role":"user","content":"hi"}]}')
+python3 - "${normal}" << 'EOF'
+import json, sys
+d = json.loads(sys.argv[1])
+assert d["stop_reason"] == "end_turn"
+assert d["content"][0]["text"] == "MOCK_OK"
+EOF
 
 echo "ALL SELFTEST CHECKS PASSED"
