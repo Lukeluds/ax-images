@@ -22,11 +22,17 @@ invokes `/usr/local/bin/ax-harness` with `/workspace` as the working directory:
 
 ## Runtime vs. Pre-Installed Builds
 
-- **Default (`PREINSTALL_AGY=false`):** Ships Debian packages, `/usr/local/share/ax/install-agy.sh`, and `/usr/local/bin/ax-harness` (no `agy` binary bundled in the image). When `agy` is missing at container startup, `ax-harness` installs `AGY_VERSION` (default `latest`) with SHA-512 verification.
+- **Default (`PREINSTALL_AGY=false`):** Ships Debian packages, `/usr/local/share/ax/install-agy.sh`, and `/usr/local/bin/ax-harness` (no `agy` binary bundled in the image). When `agy` is missing at container startup, `ax-harness` installs `AGY_VERSION` (default `latest`) with SHA-512 verification. Egress-restricted sandboxes using this mode must allow outbound HTTPS (`443`) to `antigravity-cli-auto-updater-974169037036.us-central1.run.app` and `storage.googleapis.com`.
 - **Optional pre-installed build (`--build-arg PREINSTALL_AGY=true`):** Installs `agy` during `docker build` for local or airgapped E2E environments where internet egress is blocked.
 
-## Local Test
+## Local Build & Test
 
 ```bash
 ./agents/antigravity/test_harness.sh
+
+# Default runtime-install image (no agy binary inside):
+docker build -t ax-antigravity:dev ./agents/antigravity
+
+# Optional pre-installed local build:
+docker build --build-arg PREINSTALL_AGY=true -t ax-antigravity:prebaked ./agents/antigravity
 ```

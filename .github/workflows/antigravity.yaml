@@ -49,3 +49,54 @@ jobs:
           persist-credentials: false
       - name: Test ax-harness launcher
         run: agents/antigravity/test_harness.sh
+
+  build-and-verify:
+    name: Build & verify (${{ matrix.arch }})
+    needs: unit-test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build default runtime-install image (no agy binary baked in)
+        run: |
+          docker build \
+            --build-arg AGY_VERSION="${{ inputs.agy_version || 'latest' }}" \
+            -t "ax-antigravity:runtime-${{ matrix.arch }}" \
+            agents/antigravity
+
+      - name: Verify runtime-install image purity and tools
+        run: |
+          img="ax-antigravity:runtime-${{ matrix.arch }}"
+          if docker run --rm --entrypoint sh "${img}" -c 'test -e /usr/local/bin/ax-task-runner'; then
+            echo "::error::Agent image must not contain /usr/local/bin/ax-task-runner"
+            exit 1
+          fi
+          if docker run --rm --entrypoint sh "${img}" -c 'command -v agy >/dev/null 2>&1 || test -e /root/.local/bin/agy'; then
+            echo "::error::Default runtime-install image must not bundle the agy binary"
+            exit 1
+          fi
+          docker run --rm --entrypoint test "${img}" -x /usr/local/bin/ax-harness
+          docker run --rm --entrypoint test "${img}" -x /usr/local/share/ax/install-agy.sh
+          docker run --rm --entrypoint git "${img}" --version
+          docker run --rm --entrypoint python3 "${img}" --version
+
+      - name: Verify optional PREINSTALL_AGY=true build (local only, not pushed)
+        run: |
+          img="ax-antigravity:prebaked-${{ matrix.arch }}"
+          docker build \
+            --build-arg PREINSTALL_AGY=true \
+            --build-arg AGY_VERSION="${{ inputs.agy_version || 'latest' }}" \
+            -t "${img}" \
+            agents/antigravity
+          docker run --rm --entrypoint agy "${img}" --version
+          docker rmi "${img}" >/dev/null
