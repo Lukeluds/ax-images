@@ -83,7 +83,51 @@ for r in log:
     assert secret not in r["path"], r["path"]
 EOF
 
-# 6. Reset clears the request log
+# 6. Config validation (unknown keys & invalid faults -> 400)
+test "$(code "${BASE}/_mock/config" '{"bogus":1}')" = "400"
+test "$(code "${BASE}/_mock/config" '{"fault":"bogus"}')" = "400"
+
+# 7. Fault modes: 429, 500, 503, slow, truncated_sse
+K=(-H "x-goog-api-key: ${EXPECTED_KEY}")
+for fault in 429 500 503; do
+  post "${BASE}/_mock/config" "{\"fault\":\"${fault}\"}" >/dev/null
+  test "$(code "${GEN}:streamGenerateContent?alt=sse" "${BODY}" "${K[@]}")" = "${fault}"
+done
+
+post "${BASE}/_mock/config" '{"fault":"slow","slow_delay":0.15}' >/dev/null
+post "${GEN}:generateContent" "${BODY}" "${K[@]}" | grep -q "MOCK_OK"
+
+post "${BASE}/_mock/config" '{"fault":"truncated_sse"}' >/dev/null
+trunc="$(post "${GEN}:streamGenerateContent?alt=sse" "${BODY}" "${K[@]}")"
+python3 - "${trunc}" <<'EOF'
+import json, sys
+data = sys.argv[1]
+assert data.startswith("data: "), data
+try:
+    json.loads(data[len("data: "):])
+except ValueError:
+    pass
+else:
+    raise AssertionError("truncated_sse returned valid JSON")
+EOF
+
+# 8. Scripted 2-turn write_file functionCall -> functionResponse -> MOCK_OK
+post "${BASE}/_mock/reset" "{}" >/dev/null
+post "${BASE}/_mock/config" '{"tool_write_path":"/workspace/out.txt","tool_write_content":"HELLO_TOOL"}' >/dev/null
+TOOLS='"tools":[{"functionDeclarations":[{"name":"read_file"},{"name":"write_file"}]}]'
+t1="$(post "${GEN}:streamGenerateContent?alt=sse" "{${TOOLS},\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"write\"}]}]}" "${K[@]}")"
+python3 - "${t1}" <<'EOF'
+import json, sys
+chunk = json.loads(sys.argv[1][len("data: "):].strip())
+call = chunk["candidates"][0]["content"]["parts"][0]["functionCall"]
+assert call["name"] == "write_file", call
+assert call["args"]["Path"] == "/workspace/out.txt" and call["args"]["Content"] == "HELLO_TOOL", call
+EOF
+
+t2="$(post "${GEN}:streamGenerateContent?alt=sse" "{${TOOLS},\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"write\"}]},{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"write_file\",\"args\":{}}}]},{\"role\":\"user\",\"parts\":[{\"functionResponse\":{\"name\":\"write_file\",\"response\":{}}}]}]}" "${K[@]}")"
+echo "${t2}" | grep -q "MOCK_OK"
+
+# 9. Reset clears log and restores defaults
 post "${BASE}/_mock/reset" "{}" >/dev/null
 test "$(curl -fsS "${BASE}/_mock/requests")" = "[]"
 
