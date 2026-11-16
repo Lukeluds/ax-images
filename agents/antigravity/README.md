@@ -38,8 +38,14 @@ the SHA-512 of each platform's tarball (computed from the downloaded files).
 - **Default (`PREINSTALL_AGY=false`):** Ships Debian packages, `/usr/local/share/ax/install-agy.sh`, and `/usr/local/bin/ax-harness` (no `agy` binary bundled in the image). A task must opt in to runtime installation with `AGY_RUNTIME_INSTALL=true`, which installs the pinned `agy` into `/workspace/.ax/bin` (so a resumed sandbox reuses it) and needs egress to `storage.googleapis.com`. Without the opt-in, a missing `agy` fails the task with exit code `127`.
 - **Optional pre-installed build (`--build-arg PREINSTALL_AGY=true`):** Installs the pinned `agy` during `docker build` for local or airgapped E2E environments where internet egress is blocked.
 
-## Local Test
+## Local Build & Test
 
 ```bash
 ./agents/antigravity/test_harness.sh
+
+# Default runtime-install image (no agy binary inside):
+docker build -t ax-antigravity:dev ./agents/antigravity
+
+# Optional pre-installed local build:
+docker build --build-arg PREINSTALL_AGY=true -t ax-antigravity:prebaked ./agents/antigravity
 ```
