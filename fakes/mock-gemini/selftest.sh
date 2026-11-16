@@ -25,7 +25,7 @@ BODY='{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}'
 LOG_FILE="$(mktemp)"
 
 PORT="${PORT}" EXPECTED_KEY="${EXPECTED_KEY}" REPLY_TEXT="MOCK_OK" \
-  python3 "${DIR}/mock_gemini.py" >"${LOG_FILE}" 2>&1 &
+  python3 -B "${DIR}/mock_gemini.py" >"${LOG_FILE}" 2>&1 &
 SERVER_PID=$!
 trap 'kill "${SERVER_PID}" 2>/dev/null || true; rm -f "${LOG_FILE}"' EXIT
 
@@ -83,7 +83,102 @@ for r in log:
     assert secret not in r["path"], r["path"]
 EOF
 
-# 6. Reset clears the request log
+# 6. Config validation: unknown keys, invalid faults, and bad slow_delay -> 400
+#    with zero partial state mutation.
+test "$(code "${BASE}/_mock/config" '{"bogus":1}')" = "400"
+test "$(code "${BASE}/_mock/config" '{"fault":"bogus"}')" = "400"
+test "$(code "${BASE}/_mock/config" '{"fault":"slow","slow_delay":"abc"}')" = "400"
+test "$(code "${BASE}/_mock/config" '{"fault":"slow","slow_delay":-1}')" = "400"
+test "$(code "${BASE}/_mock/config" '{"fault":"slow","slow_delay":true}')" = "400"
+test "$(code "${BASE}/_mock/config" '{"fault":"slow","slow_delay":false}')" = "400"
+test "$(code "${BASE}/_mock/config" '{"fault":"slow","slow_delay":null}')" = "400"
+
+cfg_now="$(post "${BASE}/_mock/config" '{}')"
+python3 - "${cfg_now}" <<'EOF'
+import json, sys
+cfg = json.loads(sys.argv[1])
+assert cfg["fault"] == "", cfg
+assert cfg["slow_delay"] == 2.0, cfg
+EOF
+
+# 7. Fault modes: 429, 500, 503, slow, truncated_sse (stream & non-stream)
+K=(-H "x-goog-api-key: ${EXPECTED_KEY}")
+for fault in 429 500 503; do
+  post "${BASE}/_mock/config" "{\"fault\":\"${fault}\"}" >/dev/null
+  test "$(code "${GEN}:streamGenerateContent?alt=sse" "${BODY}" "${K[@]}")" = "${fault}"
+done
+
+post "${BASE}/_mock/config" '{"fault":"slow","slow_delay":0.15}' >/dev/null
+post "${GEN}:generateContent" "${BODY}" "${K[@]}" | grep -q "MOCK_OK"
+
+post "${BASE}/_mock/config" '{"fault":"truncated_sse"}' >/dev/null
+trunc="$(post "${GEN}:streamGenerateContent?alt=sse" "${BODY}" "${K[@]}")"
+python3 - "${trunc}" <<'EOF'
+import json, sys
+data = sys.argv[1]
+assert data.startswith("data: "), data
+try:
+    json.loads(data[len("data: "):])
+except ValueError:
+    pass
+else:
+    raise AssertionError("truncated_sse returned valid SSE JSON")
+EOF
+
+# Non-streaming :generateContent under truncated_sse returns application/json
+# cut off mid-body (curl exit 18 = partial file), never SSE or full JSON.
+trunc_hdrs="$(mktemp)"
+set +e
+trunc_json="$(curl -s -D "${trunc_hdrs}" -X POST "${GEN}:generateContent" \
+  -H "content-type: application/json" "${K[@]}" -d "${BODY}")"
+trunc_rc=$?
+set -e
+test "${trunc_rc}" -eq 18
+python3 - "${trunc_json}" "${trunc_hdrs}" <<'EOF'
+import json, sys
+body, hdr_path = sys.argv[1], sys.argv[2]
+with open(hdr_path, encoding="utf-8") as f:
+    hdrs = f.read().lower()
+assert "content-type: application/json" in hdrs, hdrs
+assert "text/event-stream" not in hdrs, hdrs
+try:
+    json.loads(body)
+except ValueError:
+    pass
+else:
+    raise AssertionError(f"expected truncated JSON, got complete body: {body!r}")
+EOF
+rm -f "${trunc_hdrs}"
+
+# 8. Scripted 2-turn write_file functionCall -> functionResponse -> MOCK_OK
+post "${BASE}/_mock/reset" "{}" >/dev/null
+post "${BASE}/_mock/config" '{"tool_write_path":"/workspace/out.txt","tool_write_content":"HELLO_TOOL"}' >/dev/null
+
+# Tool-less side requests (or tools without write_file) must get plain text.
+t0_notools="$(post "${GEN}:generateContent" "${BODY}" "${K[@]}")"
+t0_othertools="$(post "${GEN}:generateContent" '{"tools":[{"functionDeclarations":[{"name":"read_file"}]}],"contents":[{"role":"user","parts":[{"text":"hi"}]}]}' "${K[@]}")"
+python3 - "${t0_notools}" "${t0_othertools}" <<'EOF'
+import json, sys
+for raw in sys.argv[1:]:
+    d = json.loads(raw)
+    part = d["candidates"][0]["content"]["parts"][0]
+    assert "functionCall" not in part and part["text"] == "MOCK_OK", d
+EOF
+
+TOOLS='"tools":[{"functionDeclarations":[{"name":"read_file"},{"name":"write_file"}]}]'
+t1="$(post "${GEN}:streamGenerateContent?alt=sse" "{${TOOLS},\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"write\"}]}]}" "${K[@]}")"
+python3 - "${t1}" <<'EOF'
+import json, sys
+chunk = json.loads(sys.argv[1][len("data: "):].strip())
+call = chunk["candidates"][0]["content"]["parts"][0]["functionCall"]
+assert call["name"] == "write_file", call
+assert call["args"]["Path"] == "/workspace/out.txt" and call["args"]["Content"] == "HELLO_TOOL", call
+EOF
+
+t2="$(post "${GEN}:streamGenerateContent?alt=sse" "{${TOOLS},\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"write\"}]},{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"write_file\",\"args\":{}}}]},{\"role\":\"user\",\"parts\":[{\"functionResponse\":{\"name\":\"write_file\",\"response\":{}}}]}]}" "${K[@]}")"
+echo "${t2}" | grep -q "MOCK_OK"
+
+# 9. Reset clears log and restores defaults
 post "${BASE}/_mock/reset" "{}" >/dev/null
 test "$(curl -fsS "${BASE}/_mock/requests")" = "[]"
 
