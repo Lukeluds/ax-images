@@ -122,6 +122,21 @@ bad_cfg=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${BASE}/_mock/config" 
   -H "content-type: application/json" -d '{"fault":"unknown"}')
 test "${bad_cfg}" = "400"
 
+# Invalid slow_delay -> 400 and nothing applied (no half-applied config).
+bad_delay=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${BASE}/_mock/config" \
+  -H "content-type: application/json" -d '{"fault":"slow","slow_delay":"abc"}')
+test "${bad_delay}" = "400"
+neg_delay=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${BASE}/_mock/config" \
+  -H "content-type: application/json" -d '{"slow_delay":-1}')
+test "${neg_delay}" = "400"
+cfg_now=$(curl -fsS -X POST "${BASE}/_mock/config" -H "content-type: application/json" -d '{}')
+python3 - "${cfg_now}" << 'EOF'
+import json, sys
+cfg = json.loads(sys.argv[1])
+assert cfg["fault"] == "", cfg
+assert cfg["slow_delay"] == 2.0, cfg
+EOF
+
 curl -fsS -X POST "${BASE}/_mock/config" -H "content-type: application/json" -d '{"fault":"429"}' >/dev/null
 headers_429="$(mktemp)"
 code=$(curl -s -D "${headers_429}" -o /dev/null -w "%{http_code}" -X POST "${BASE}/v1/messages" \
@@ -158,10 +173,48 @@ assert "event: message_start" in d
 assert "event: message_stop" not in d
 EOF
 
+# truncated_sse on a non-streaming request: JSON content-type, body cut off
+# (curl exits 18 = "partial file"), never an SSE stream.
+trunc_hdrs="$(mktemp)"
+set +e
+trunc_json=$(curl -s -D "${trunc_hdrs}" -X POST "${BASE}/v1/messages" \
+  -H "x-api-key: ${EXPECTED_KEY}" -H "content-type: application/json" \
+  -d '{"stream":false,"messages":[{"role":"user","content":"hi"}]}')
+trunc_rc=$?
+set -e
+test "${trunc_rc}" -eq 18
+python3 - "${trunc_json}" "${trunc_hdrs}" << 'EOF'
+import json, sys
+body, hdr_path = sys.argv[1], sys.argv[2]
+with open(hdr_path, encoding="utf-8") as f:
+    hdrs = f.read().lower()
+assert "content-type: application/json" in hdrs, hdrs
+assert "text/event-stream" not in hdrs, hdrs
+try:
+    json.loads(body)
+except ValueError:
+    pass
+else:
+    raise AssertionError(f"expected truncated JSON, got complete body: {body!r}")
+EOF
+rm -f "${trunc_hdrs}"
+
 # 9. Scripted Write tool_use (turn 1 -> tool_use, turn 2 with tool_result -> MOCK_OK)
 curl -fsS -X POST "${BASE}/_mock/reset" >/dev/null
 curl -fsS -X POST "${BASE}/_mock/config" -H "content-type: application/json" \
   -d '{"tool_write_path":"/workspace/out.txt","tool_write_content":"HELLO_TOOL"}' >/dev/null
+
+# Side requests that offer no tools (quota probes, title generation) must get a
+# plain text reply, not the scripted Write call.
+t0=$(curl -fsS -X POST "${BASE}/v1/messages" \
+  -H "x-api-key: ${EXPECTED_KEY}" -H "content-type: application/json" \
+  -d '{"model":"claude-haiku","max_tokens":1,"messages":[{"role":"user","content":"title?"}]}')
+python3 - "${t0}" << 'EOF'
+import json, sys
+d = json.loads(sys.argv[1])
+assert d["stop_reason"] == "end_turn", d
+assert d["content"][0]["type"] == "text", d
+EOF
 
 t1=$(curl -fsS -X POST "${BASE}/v1/messages" \
   -H "x-api-key: ${EXPECTED_KEY}" -H "content-type: application/json" \

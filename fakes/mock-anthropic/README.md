@@ -13,9 +13,9 @@ injection without live API keys or model spend.
 | `EXPECTED_KEY` | `test-key` | Credential callers must send in `x-api-key` or `Authorization: Bearer <token>`. Mismatched or missing keys return `401`. |
 | `REPLY_TEXT` | `MOCK_OK` | Assistant reply text returned by `/v1/messages` and `:rawPredict` / `:streamRawPredict`. |
 | `PORT` | `8080` | TCP port to listen on. |
-| `FAULT` | `""` | Optional fault mode: `429` (rate limit with `Retry-After: 1`), `500` (server error), `slow` (delayed response/SSE), or `truncated_sse` (drops stream before `message_stop`). |
-| `SLOW_DELAY` | `2.0` | Total delay in seconds when `FAULT=slow`. |
-| `TOOL_WRITE_PATH` | `""` | When set, turn 1 returns a `Write` `tool_use` call writing `TOOL_WRITE_CONTENT` to this path; turn 2 (with `tool_result`) returns `REPLY_TEXT`. |
+| `FAULT` | `""` | Optional fault mode: `429` (rate limit with `Retry-After: 1`), `500` (server error), `slow` (delayed response/SSE), or `truncated_sse` (streaming requests stop before `message_stop`; non-streaming requests get a `200` JSON response whose body is cut off mid-way). |
+| `SLOW_DELAY` | `2.0` | Total delay in seconds when `FAULT=slow` (must be a finite number `>= 0`). |
+| `TOOL_WRITE_PATH` | `""` | When set, turn 1 returns a `Write` `tool_use` call writing `TOOL_WRITE_CONTENT` to this path, but only if the request offers a `Write` tool (requests without `tools` get a normal text reply). Turn 2 (with `tool_result`) returns `REPLY_TEXT`. |
 | `TOOL_WRITE_CONTENT` | `MOCK_TOOL_OK` | File content used by `TOOL_WRITE_PATH`. |
 
 ## Supported Endpoints
@@ -27,7 +27,7 @@ injection without live API keys or model spend.
 - `POST /v1/messages/count_tokens` (and `:countTokens`) — Token count stub (`{"input_tokens": 10}`).
 - `GET /v1/models` — Model list stub.
 - `GET /_mock/requests` — Recorded requests (`method`, `path`, `auth_ok`, `key_presented`, and `headers` with `x-api-key` and `authorization` redacted).
-- `POST /_mock/config` — Runtime JSON override for `fault`, `slow_delay`, `tool_write_path`, and `tool_write_content` (no container restart needed).
+- `POST /_mock/config` — Runtime JSON override for `fault`, `slow_delay`, `tool_write_path`, and `tool_write_content` (no container restart needed). Invalid values return `400` and leave the config unchanged.
 - `POST /_mock/reset` — Clears recorded requests and resets runtime overrides back to startup environment defaults.
 
 ## Local Smoke Test

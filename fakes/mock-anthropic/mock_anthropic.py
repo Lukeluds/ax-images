@@ -25,7 +25,9 @@ Environment variables:
   REPLY_TEXT          Canned assistant text reply (default: "MOCK_OK").
   PORT                TCP port to listen on (default: 8080).
   FAULT               Optional fault mode: "" | "429" | "500" | "slow" |
-                      "truncated_sse".
+                      "truncated_sse" (streaming requests stop before
+                      message_stop; non-streaming requests get a JSON body cut
+                      off mid-way).
   SLOW_DELAY          Seconds to delay in FAULT="slow" mode (default: 2.0).
   TOOL_WRITE_PATH     If non-empty, emit a Write tool_use turn before the final
                       text reply.
@@ -41,6 +43,7 @@ Inspection & control endpoints:
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 import os
 import threading
 import time
@@ -82,15 +85,19 @@ def has_tool_result(messages):
 
 
 def should_emit_tool_use(body, cfg):
-    """Returns True on turn 1 when scripted Write tool_use is enabled."""
+    """Returns True on turn 1 when scripted Write tool_use is enabled.
+
+    Only fires when the caller actually offers a Write tool, so side requests
+    without tools (quota probes, title generation) get a plain text reply.
+    """
     if not cfg["tool_write_path"]:
         return False
     if has_tool_result(body.get("messages")):
         return False
     tools = body.get("tools")
-    if isinstance(tools, list):
-        return any(isinstance(t, dict) and t.get("name") == "Write" for t in tools)
-    return True
+    return isinstance(tools, list) and any(
+        isinstance(t, dict) and t.get("name") == "Write" for t in tools
+    )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -105,6 +112,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
+
+    def _truncated_json(self, code, obj):
+        """Promises the full JSON body but closes after sending half of it."""
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(code)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.send_header("connection", "close")
+        self.end_headers()
+        self.wfile.write(body[: len(body) // 2])
+        self.wfile.flush()
+        self.close_connection = True
 
     def _sse_events(self, events, delay=0.0, truncate=False):
         self.send_response(200)
@@ -334,9 +353,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"error": f"unknown keys: {sorted(unknown)}"})
             if "fault" in patch and patch["fault"] not in VALID_FAULTS:
                 return self._json(400, {"error": f"invalid fault: {patch['fault']!r}"})
+            # Validate everything before taking the lock so a bad value never
+            # leaves the config half-applied.
+            if "slow_delay" in patch:
+                try:
+                    delay = float(patch["slow_delay"])
+                except (TypeError, ValueError):
+                    return self._json(400, {"error": "slow_delay must be a number"})
+                if not math.isfinite(delay) or delay < 0:
+                    return self._json(
+                        400, {"error": "slow_delay must be a finite number >= 0"}
+                    )
+                patch["slow_delay"] = delay
             with _LOCK:
-                for key, val in patch.items():
-                    _CONFIG[key] = float(val) if key == "slow_delay" else val
+                _CONFIG.update(patch)
                 snapshot = dict(_CONFIG)
             return self._json(200, snapshot)
 
@@ -369,7 +399,7 @@ class Handler(BaseHTTPRequestHandler):
             delay = cfg["slow_delay"] if fault == "slow" else 0.0
             truncate = fault == "truncated_sse"
 
-            if body.get("stream") or path.endswith(":streamRawPredict") or truncate:
+            if body.get("stream") or path.endswith(":streamRawPredict"):
                 events = (
                     self._tool_events(model, cfg)
                     if use_tool
@@ -381,33 +411,28 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(delay)
 
             if use_tool:
-                return self._json(
-                    200,
-                    {
-                        "id": "msg_mock_tool",
-                        "type": "message",
-                        "role": "assistant",
-                        "model": model,
-                        "content": [
-                            {
-                                "type": "tool_use",
-                                "id": "toolu_mock_01",
-                                "name": "Write",
-                                "input": {
-                                    "file_path": cfg["tool_write_path"],
-                                    "content": cfg["tool_write_content"],
-                                },
-                            }
-                        ],
-                        "stop_reason": "tool_use",
-                        "stop_sequence": None,
-                        "usage": {"input_tokens": 1, "output_tokens": 10},
-                    },
-                )
-
-            return self._json(
-                200,
-                {
+                payload = {
+                    "id": "msg_mock_tool",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model,
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_mock_01",
+                            "name": "Write",
+                            "input": {
+                                "file_path": cfg["tool_write_path"],
+                                "content": cfg["tool_write_content"],
+                            },
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 10},
+                }
+            else:
+                payload = {
                     "id": "msg_mock",
                     "type": "message",
                     "role": "assistant",
@@ -416,8 +441,11 @@ class Handler(BaseHTTPRequestHandler):
                     "stop_reason": "end_turn",
                     "stop_sequence": None,
                     "usage": {"input_tokens": 1, "output_tokens": 2},
-                },
-            )
+                }
+
+            if truncate:
+                return self._truncated_json(200, payload)
+            return self._json(200, payload)
 
         self._json(
             404,
