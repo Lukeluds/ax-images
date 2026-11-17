@@ -1,0 +1,269 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Pushing a vX.Y.Z[-PRERELEASE] tag builds the images present at that tag for
+# linux/amd64 and linux/arm64 and pushes them to
+# ghcr.io/agentexecutor/<image>:<tag>.
+#
+# Images that already exist for the tag are not rebuilt, so a rerun never
+# changes the digests of a published tag; a manual run with overwrite replaces
+# them. This workflow never moves :latest.
+#
+# A dry run (pull requests that touch the workflow or Dockerfiles, or a manual
+# run with dry_run) builds everything and pushes to an ephemeral registry
+# inside the job. Only agentexecutor/images publishes; in a fork only dry runs
+# execute.
+name: Release Images
+
+on:
+  push:
+    # The filter cannot express the full semver pattern, so the plan job
+    # rejects anything outside vMAJOR.MINOR.PATCH[-PRERELEASE] before building.
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/release.yaml'
+      - 'agents/**/Dockerfile'
+      - 'fakes/**/Dockerfile'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build images for (e.g. v0.0.0); only tags that contain this workflow are supported'
+        required: true
+        type: string
+      images:
+        description: 'Optional comma-separated subset of images to build (default: all catalog images present at the tag)'
+        required: false
+        default: ''
+        type: string
+      overwrite:
+        description: 'Rebuild and replace images that already exist for the tag'
+        type: boolean
+        default: false
+      dry_run:
+        description: 'Build everything but publish nothing: images go to an ephemeral registry inside the job'
+        type: boolean
+        default: false
+
+# Each job requests only the permissions it needs.
+permissions:
+  contents: read
+
+# Keyed by tag, not event, so a tag push and a manual run for the same tag
+# never race on the existence check and push.
+concurrency:
+  group: release-images-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || inputs.tag || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  DRY_RUN: ${{ github.event_name == 'pull_request' || inputs.dry_run == true }}
+  # The dry-run registry runs as a service container inside each publish job.
+  IMAGE_REPO: ${{ (github.event_name == 'pull_request' || inputs.dry_run == true) && 'localhost:5000/agentexecutor' || 'ghcr.io/agentexecutor' }}
+  # Pull requests have no tag; their dry run uses a placeholder version.
+  TAG: ${{ inputs.tag || (github.event_name == 'pull_request' && 'v0.0.0-dryrun') || github.ref_name }}
+  # Pull requests build the merge commit; tags and manual runs build the tag.
+  REF: ${{ github.event_name != 'pull_request' && format('refs/tags/{0}', inputs.tag || github.ref_name) || '' }}
+  OVERWRITE: ${{ inputs.overwrite == true }}
+  # Sourced by the publish step. existing_digest prints the digest of $1 and
+  # returns 0 if it exists, returns 1 if the registry reports it missing, and
+  # fails the step on any other error (auth, rate limit, network), so a
+  # transient error never rebuilds and replaces a published image.
+  EXISTING_DIGEST_SH: |
+    existing_digest() {
+      local out
+      if out="$(docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' 2>&1)"; then
+        jq -r .digest <<<"${out}"
+        return 0
+      fi
+      if [[ "${out}" == *": not found"* || "${out}" == *"MANIFEST_UNKNOWN"* || "${out}" == *"NAME_UNKNOWN"* ]]; then
+        return 1
+      fi
+      echo "::error::Cannot check whether $1 exists: ${out}" >&2
+      exit 2
+    }
+  # Release image catalog. Entries whose <context>/Dockerfile is not yet on the
+  # checked-out commit are skipped unless explicitly requested via inputs.images.
+  IMAGE_CATALOG: |
+    [
+      {"name": "antigravity", "context": "agents/antigravity"},
+      {"name": "claude-code", "context": "agents/claude-code"},
+      {"name": "mock-anthropic", "context": "fakes/mock-anthropic"},
+      {"name": "mock-gemini", "context": "fakes/mock-gemini"}
+    ]
+
+jobs:
+  plan:
+    if: github.repository == 'agentexecutor/images' || github.event_name == 'pull_request' || inputs.dry_run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      images: ${{ steps.plan.outputs.images }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.REF }}
+          persist-credentials: false
+
+      - name: Plan the build
+        id: plan
+        env:
+          INPUT_IMAGES: ${{ inputs.images }}
+        run: |
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::${TAG} is not a release tag (vMAJOR.MINOR.PATCH[-PRERELEASE])"
+            exit 1
+          fi
+
+          if [[ -n "${INPUT_IMAGES}" ]]; then
+            selected="$(jq -c --arg req "${INPUT_IMAGES}" '
+              ($req | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $names
+              | ($names - map(.name)) as $unknown
+              | if ($unknown | length) > 0
+                then error("unknown image(s): \($unknown | join(", ")); known: \(map(.name) | join(", "))")
+                else map(select(.name as $n | $names | index($n)))
+                end' <<<"${IMAGE_CATALOG}")"
+            while IFS=$'\t' read -r name ctx; do
+              if [[ ! -f "${ctx}/Dockerfile" ]]; then
+                echo "::error::Requested image ${name} has no ${ctx}/Dockerfile at ${TAG}"
+                exit 1
+              fi
+            done < <(jq -r '.[] | [.name, .context] | @tsv' <<<"${selected}")
+          else
+            present=()
+            while IFS=$'\t' read -r name ctx; do
+              if [[ -f "${ctx}/Dockerfile" ]]; then
+                present+=("${name}")
+              fi
+            done < <(jq -r '.[] | [.name, .context] | @tsv' <<<"${IMAGE_CATALOG}")
+            present_csv="$(IFS=,; echo "${present[*]}")"
+            selected="$(jq -c --arg req "${present_csv}" '
+              ($req | split(",") | map(select(. != ""))) as $names
+              | map(select(.name as $n | $names | index($n)))' <<<"${IMAGE_CATALOG}")"
+          fi
+
+          if [[ "${selected}" == "[]" ]]; then
+            echo "::error::No release images found to build at ${TAG}"
+            exit 1
+          fi
+
+          echo "images=${selected}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Release images ${TAG}"
+            echo ""
+            echo "- Registry: \`${IMAGE_REPO}\` (dry run: ${DRY_RUN}, overwrite: ${OVERWRITE})"
+            echo "- Images: $(jq -r 'map(.name) | join(", ")' <<<"${selected}")"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  publish:
+    needs: plan
+    if: needs.plan.outputs.images != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    # packages: write is granted on pull requests too (permissions cannot be
+    # conditional), but dry runs never log in, and fork PRs get a read-only
+    # token regardless.
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.images) }}
+    # Receives the images in a dry run.
+    services:
+      registry:
+        image: registry:3@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
+        ports:
+          - 5000:5000
+    env:
+      NAME: ${{ matrix.name }}
+      CONTEXT: ${{ matrix.context }}
+      PLATFORMS: linux/amd64,linux/arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.REF }}
+          persist-credentials: false
+
+      # Agent Dockerfiles run apt-get, so arm64 builds on x86_64 runners need
+      # QEMU emulation.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      # BuildKit is pinned by digest because it builds published images with
+      # the ghcr.io login. Host networking lets it reach the dry-run registry.
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: |
+            image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+            network=host
+
+      - name: Log in to ghcr.io
+        if: env.DRY_RUN != 'true'
+        env:
+          TOKEN: ${{ github.token }}
+        run: echo "${TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Build and push ${{ matrix.name }}
+        run: |
+          eval "${EXISTING_DIGEST_SH}"
+          revision="$(git rev-parse HEAD)"
+          ref="${IMAGE_REPO}/${NAME}:${TAG}"
+          digest=""
+          rc=1
+          if [[ "${OVERWRITE}" != true ]]; then
+            rc=0
+            digest="$(existing_digest "${ref}")" || rc=$?
+            [[ "${rc}" -ge 2 ]] && exit 1
+          fi
+          if [[ "${rc}" -eq 0 ]]; then
+            echo "==> ${ref} already exists (${digest}); not rebuilding"
+          else
+            metadata="$(mktemp)"
+            echo "==> Building and pushing ${ref} (${PLATFORMS}) from ${CONTEXT}"
+            docker buildx build \
+              --platform "${PLATFORMS}" \
+              --tag "${ref}" \
+              --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+              --label "org.opencontainers.image.version=${TAG}" \
+              --label "org.opencontainers.image.revision=${revision}" \
+              --label "org.opencontainers.image.licenses=Apache-2.0" \
+              --provenance=false \
+              --metadata-file "${metadata}" \
+              --push \
+              "${CONTEXT}"
+            digest="$(jq -r '."containerimage.digest"' "${metadata}")"
+          fi
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::No digest recorded for ${NAME}"
+            exit 1
+          fi
+          # Confirm the published manifest index covers every requested platform.
+          manifest="$(docker buildx imagetools inspect "${IMAGE_REPO}/${NAME}@${digest}" --raw)"
+          IFS=, read -ra platforms <<<"${PLATFORMS}"
+          for p in "${platforms[@]}"; do
+            os="${p%/*}"
+            arch="${p#*/}"
+            if ! jq -e --arg os "${os}" --arg arch "${arch}" \
+              '.manifests[] | select(.platform.os == $os and .platform.architecture == $arch)' \
+              <<<"${manifest}" >/dev/null; then
+              echo "::error::${NAME}@${digest} is missing platform ${p}"
+              exit 1
+            fi
+          done
+          echo "- \`${IMAGE_REPO}/${NAME}@${digest}\`" >> "${GITHUB_STEP_SUMMARY}"
