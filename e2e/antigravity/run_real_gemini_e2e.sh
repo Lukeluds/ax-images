@@ -17,7 +17,8 @@
 # Opt-in end-to-end verification of the default PREINSTALL_AGY=false
 # agents/antigravity image on Agent Substrate (gVisor) against the live Gemini
 # API (generativelanguage.googleapis.com), exercising:
-#   1. Runtime download & SHA-512 verification of agy via tlsPassthrough;
+#   1. Opt-in runtime download (AGY_RUNTIME_INSTALL=true) of the pinned agy
+#      from storage.googleapis.com via tlsPassthrough;
 #   2. Substrate HTTPS MITM CA trust bundle auto-wiring in ax-harness;
 #   3. Gateway x-goog-api-key credential injection from a Kubernetes Secret
 #      (the sandbox holds only GEMINI_API_KEY=placeholder);
@@ -183,6 +184,9 @@ containers:
               echo "PROC1_CLEAN=yes"
             fi
             /usr/local/bin/ax-harness
+            if [[ -s "\${AX_OUTPUT_FILE}" ]]; then
+              echo "AX_OUTPUT_WRITTEN=yes"
+            fi
             echo "=== math_utils.py ==="
             cat /workspace/app/math_utils.py
             echo "=== test_math.py ==="
@@ -205,6 +209,10 @@ containers:
           value: /workspace/.ax/goal.md
         - name: AX_CONFIG_FILE
           value: /workspace/.ax/config.json
+        - name: AX_OUTPUT_FILE
+          value: /workspace/.ax/output
+        - name: AGY_RUNTIME_INSTALL
+          value: "true"
         - name: GEMINI_API_KEY
           value: placeholder
   volumeMounts:
@@ -288,8 +296,11 @@ check() {
 if [[ "${PREINSTALL_AGY}" == "false" ]]; then
   check "runtime-install-agy" \
     "$(echo "${LOGS}" | grep -q "install-agy: installed agy" && echo true || echo false)" \
-    "downloaded and verified agy via tlsPassthrough"
+    "downloaded and verified the pinned agy via tlsPassthrough"
 fi
+check "ax-output-file" \
+  "$(echo "${LOGS}" | grep -q "AX_OUTPUT_WRITTEN=yes" && echo true || echo false)" \
+  "answer written to AX_OUTPUT_FILE (/workspace/.ax/output)"
 check "placeholder-env" \
   "$(echo "${LOGS}" | grep -q "IS_PLACEHOLDER=yes" && echo true || echo false)" \
   "container GEMINI_API_KEY remained placeholder"

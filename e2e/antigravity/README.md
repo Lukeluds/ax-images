@@ -35,7 +35,9 @@ Optional environment overrides: `AX_DIR`, `KUBECONFIG`, `KUBECTL_ATE`,
 
 To exercise the default `PREINSTALL_AGY=false` image end-to-end against real
 `generativelanguage.googleapis.com` (including runtime `install-agy.sh` download
-via `tlsPassthrough`, Substrate HTTPS MITM CA trust bundle auto-wiring, and
+of the pinned `agy` from `storage.googleapis.com` via `tlsPassthrough` with
+`AGY_RUNTIME_INSTALL=true`, answer written to `AX_OUTPUT_FILE`, Substrate HTTPS
+MITM CA trust bundle auto-wiring, and
 gateway `x-goog-api-key` credential injection on the `ax` hero-demo task):
 
 1. Store a Gemini API key in the allowed credential namespace (never commit or

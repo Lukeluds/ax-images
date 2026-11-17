@@ -15,7 +15,6 @@
 rules:
   - tlsPassthrough:
       hostnames:
-        - antigravity-cli-auto-updater-974169037036.us-central1.run.app
         - storage.googleapis.com
       ports:
         numbers:
