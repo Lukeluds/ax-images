@@ -17,10 +17,16 @@
 # ax-harness: Antigravity CLI (agy) launcher for the AX in-container wrapper
 # contract.
 #
-# Inputs provided by the mounted AX runner:
-#   AX_GOAL_FILE    path to the task's goal (spec.config.prompt)
-#   AX_CONFIG_FILE  optional path to spec.config serialized as JSON
-#   cwd             the task's workspace
+# Inputs provided by the mounted AX runner (see runner/launcher.go in
+# github.com/google/ax):
+#   AX_GOAL_FILE        path to the task's goal (spec.goal.text)
+#   AX_CONFIG_FILE      optional path to spec.config serialized as JSON
+#   AX_MCP_CONFIG_FILE  optional path to the Workspace's MCP servers as
+#                       {"mcpServers": {...}}; each is registered with
+#                       `agy mcp add` before the task runs
+#   AX_OUTPUT_FILE      optional path the agent's final answer is written to
+#                       (AX reports it as status.outcome.output)
+#   cwd                 the task's workspace
 #
 # Optional environment variables:
 #   AGY_VERSION         version installed on runtime fallback (default: "latest")
@@ -34,7 +40,7 @@ goal_file="${AX_GOAL_FILE:?AX_GOAL_FILE is not set; ax-harness must be started b
 config_file="${AX_CONFIG_FILE:-}"
 
 if [[ ! -s "${goal_file}" ]]; then
-  echo "ax-harness: empty goal in ${goal_file}; set spec.config.prompt" >&2
+  echo "ax-harness: empty goal in ${goal_file}; set spec.goal.text" >&2
   exit 2
 fi
 
@@ -64,6 +70,50 @@ fi
 if ! command -v "${AGY_BIN}" >/dev/null 2>&1; then
   echo "ax-harness: ${AGY_BIN} is still not available on PATH after install" >&2
   exit 127
+fi
+
+# Registers the Workspace's MCP servers. `agy mcp add` adds or updates a
+# server, so re-running on resume is idempotent. Each server is emitted as
+# NUL-delimited `agy mcp add` args followed by an empty terminator.
+mcp_file="${AX_MCP_CONFIG_FILE:-}"
+if [[ -n "${mcp_file}" && -s "${mcp_file}" ]]; then
+  # Written to a file first so a malformed MCP config fails the task under
+  # set -e instead of silently registering nothing.
+  mcp_list="$(mktemp)"
+  python3 - "${mcp_file}" >"${mcp_list}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    servers = (json.load(f) or {}).get("mcpServers") or {}
+if not isinstance(servers, dict):
+    raise ValueError("mcpServers must be an object")
+
+for name in sorted(servers):
+    srv = servers[name] or {}
+    kind = srv.get("type") or ("http" if srv.get("url") else "stdio")
+    if kind == "http" and srv.get("url"):
+        args = ["--type", "http", name, srv["url"]]
+    elif kind == "stdio" and srv.get("command"):
+        args = ["--type", "stdio", name, "--", srv["command"], *map(str, srv.get("args") or [])]
+    else:
+        print(f"ax-harness: skipping MCP server {name!r} with neither url nor command", file=sys.stderr)
+        continue
+    for item in args + [""]:
+        sys.stdout.buffer.write(item.encode("utf-8") + b"\0")
+PY
+  mapfile -d '' -t mcp_args <"${mcp_list}"
+  rm -f "${mcp_list}"
+  server=()
+  for item in "${mcp_args[@]}"; do
+    if [[ -n "${item}" ]]; then
+      server+=("${item}")
+      continue
+    fi
+    echo "ax-harness: registering MCP server ${server[2]}" >&2
+    "${AGY_BIN}" mcp add "${server[@]}" >&2
+    server=()
+  done
 fi
 
 # Prints outputFile (empty string when unset), followed by NUL-delimited agy args.
@@ -132,16 +182,24 @@ for item in [output_file] + out:
 PY
 )
 
-output_file="${parsed[0]}"
 agy_args=("${parsed[@]:1}")
 
-if [[ -z "${output_file}" ]]; then
+# The answer goes to stdout (logs), to AX_OUTPUT_FILE for AX, and to
+# spec.config.outputFile when set.
+outputs=()
+for f in "${AX_OUTPUT_FILE:-}" "${parsed[0]}"; do
+  if [[ -n "${f}" ]]; then
+    mkdir -p "$(dirname "${f}")"
+    outputs+=("${f}")
+  fi
+done
+
+if [[ "${#outputs[@]}" -eq 0 ]]; then
   exec "${AGY_BIN}" "${agy_args[@]}"
 fi
 
-mkdir -p "$(dirname "${output_file}")"
 set +e
-"${AGY_BIN}" "${agy_args[@]}" | tee "${output_file}"
+"${AGY_BIN}" "${agy_args[@]}" | tee "${outputs[@]}"
 status="${PIPESTATUS[0]}"
 set -e
 exit "${status}"

@@ -23,10 +23,15 @@ trap 'rm -rf "${TMP}"' EXIT
 cat >"${TMP}/fake-agy" <<'EOF'
 #!/usr/bin/env python3
 import json, os, sys
+if sys.argv[1:2] == ["mcp"]:
+    with open(os.environ["FAKE_AGY_LOG"], "a", encoding="utf-8") as f:
+        f.write(json.dumps(sys.argv[1:]) + "\n")
+    sys.exit(0)
 print(json.dumps(sys.argv[1:]))
 sys.exit(int(os.environ.get("FAKE_AGY_EXIT", "0")))
 EOF
 chmod +x "${TMP}/fake-agy"
+export FAKE_AGY_LOG="${TMP}/agy-calls.log"
 
 run_case() {
   local cfg="$1"
@@ -35,7 +40,7 @@ run_case() {
   printf '%s' "${cfg}" >"${TMP}/config.json"
   (
     cd "${TMP}"
-    env -u GEMINI_API_KEY -u AGY_ADC_AUTH "$@" \
+    env -u GEMINI_API_KEY -u AGY_ADC_AUTH -u AX_OUTPUT_FILE -u AX_MCP_CONFIG_FILE "$@" \
       AX_GOAL_FILE="${TMP}/goal.md" \
       AX_CONFIG_FILE="${TMP}/config.json" \
       AGY_BIN="${TMP}/fake-agy" \
@@ -157,5 +162,56 @@ ca_override="$(
 )"
 check_eq "trust-bundle-preserve" "${ca_override}" \
   "{\"ssl\":\"/custom/ca.pem\",\"curl\":\"${TMP}/trust-bundle.pem\"}"
+
+DEFAULT_ARGS="[\"--add-dir=${TMP}\", \"--dangerously-skip-permissions\", \"--print=Reply with MOCK_OK.\"]"
+
+# 10. AX_OUTPUT_FILE receives the answer (also on stdout), and agy's exit
+#     status is preserved.
+set +e
+out="$(run_case '{}' AX_OUTPUT_FILE="${TMP}/ws/.ax/output" FAKE_AGY_EXIT=4)"
+status=$?
+set -e
+test "${status}" -eq 4
+check_eq "ax-output stdout" "${out}" "${DEFAULT_ARGS}"
+check_eq "ax-output file" "$(cat "${TMP}/ws/.ax/output")" "${DEFAULT_ARGS}"
+
+# 11. AX_OUTPUT_FILE and spec.config.outputFile both receive the answer.
+rm -rf "${TMP}/ws" "${TMP}/out"
+run_case '{"outputFile":"out/answer.txt"}' AX_OUTPUT_FILE="${TMP}/ws/.ax/output" >/dev/null
+check_eq "ax-output both (AX_OUTPUT_FILE)" "$(cat "${TMP}/ws/.ax/output")" "${DEFAULT_ARGS}"
+check_eq "ax-output both (outputFile)" "$(cat "${TMP}/out/answer.txt")" "${DEFAULT_ARGS}"
+
+# 12. MCP servers are registered with `agy mcp add` (http and stdio, sorted by
+#     name) before the task runs, without polluting the answer.
+rm -f "${FAKE_AGY_LOG}"
+cat >"${TMP}/mcp.json" <<'EOF'
+{"mcpServers": {
+  "web": {"type": "http", "url": "https://mcp.example.com/mcp"},
+  "fs": {"type": "stdio", "command": "npx", "args": ["-y", "@mcp/fs", "/workspace"]},
+  "broken": {"type": "stdio"}
+}}
+EOF
+out="$(run_case '{}' AX_MCP_CONFIG_FILE="${TMP}/mcp.json" 2>/dev/null)"
+check_eq "mcp answer" "${out}" "${DEFAULT_ARGS}"
+check_eq "mcp calls" "$(python3 - "${FAKE_AGY_LOG}" <<'EOF'
+import json, sys
+print(json.dumps([json.loads(line) for line in open(sys.argv[1])]))
+EOF
+)" \
+  '[["mcp", "add", "--type", "stdio", "fs", "--", "npx", "-y", "@mcp/fs", "/workspace"], ["mcp", "add", "--type", "http", "web", "https://mcp.example.com/mcp"]]'
+
+# 13. No MCP servers means no `agy mcp` calls.
+rm -f "${FAKE_AGY_LOG}"
+printf '{"mcpServers":{}}' >"${TMP}/mcp-empty.json"
+run_case '{}' AX_MCP_CONFIG_FILE="${TMP}/mcp-empty.json" >/dev/null
+test ! -e "${FAKE_AGY_LOG}"
+
+# 14. A malformed MCP config fails the task instead of being ignored.
+printf '{not json' >"${TMP}/mcp-bad.json"
+set +e
+run_case '{}' AX_MCP_CONFIG_FILE="${TMP}/mcp-bad.json" >/dev/null 2>&1
+rc=$?
+set -e
+test "${rc}" -ne 0
 
 echo "ALL AX-HARNESS TESTS PASSED"
