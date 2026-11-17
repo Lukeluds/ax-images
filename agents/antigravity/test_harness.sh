@@ -86,14 +86,15 @@ check_eq "outputFile file" "$(cat "${TMP}/out/answer.txt")" "${out}"
 run_case '{}' >/dev/null
 test ! -e "${TMP}/ax-output.md"
 
-# 7. Runtime install fallback installs into $HOME/.local/bin when missing.
+# 7. Runtime install is opt-in (AGY_RUNTIME_INSTALL=true) and installs into
+#    <workspace>/.ax/bin, so a resumed sandbox finds agy without reinstalling.
 FAKE_HOME="${TMP}/home"
 mkdir -p "${FAKE_HOME}"
 cat >"${TMP}/mock-install-agy.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 mkdir -p "$2"
-printf '%s' "$1" > "${HOME}/installed_version.txt"
+printf '%s\n' "$1" >> "${HOME}/installed_versions.txt"
 cat > "$2/agy-runtime-test" <<'INNER'
 #!/usr/bin/env python3
 import json, sys
@@ -103,20 +104,54 @@ chmod +x "$2/agy-runtime-test"
 EOF
 chmod +x "${TMP}/mock-install-agy.sh"
 
-printf 'Reply with MOCK_OK.' >"${TMP}/goal.md"
-got_rt="$(
-  cd "${TMP}"
-  env -u GEMINI_API_KEY -u AGY_ADC_AUTH \
-    HOME="${FAKE_HOME}" \
-    AX_GOAL_FILE="${TMP}/goal.md" \
-    AGY_BIN="agy-runtime-test" \
-    AGY_VERSION="1.5.7" \
-    AGY_INSTALL_SCRIPT="${TMP}/mock-install-agy.sh" \
-    "${DIR}/ax-harness" 2>/dev/null
-)"
-test "$(cat "${FAKE_HOME}/installed_version.txt")" = "1.5.7"
+run_runtime() {
+  printf 'Reply with MOCK_OK.' >"${TMP}/goal.md"
+  (
+    cd "${TMP}"
+    env -u GEMINI_API_KEY -u AGY_ADC_AUTH -u AGY_VERSION -u AGY_INSTALL_DIR -u AGY_RUNTIME_INSTALL "$@" \
+      HOME="${FAKE_HOME}" \
+      AX_GOAL_FILE="${TMP}/goal.md" \
+      AGY_BIN="agy-runtime-test" \
+      AGY_INSTALL_SCRIPT="${TMP}/mock-install-agy.sh" \
+      "${DIR}/ax-harness" 2>/dev/null
+  )
+}
+
+# 7a. Without opt-in, a missing agy fails with 127 and nothing is installed.
+set +e
+run_runtime >/dev/null
+rc=$?
+set -e
+test "${rc}" -eq 127
+test ! -e "${FAKE_HOME}/installed_versions.txt"
+
+# 7b. With opt-in, AGY_VERSION is passed through and agy lands in .ax/bin.
+got_rt="$(run_runtime AGY_RUNTIME_INSTALL=true AGY_VERSION=1.5.7)"
+test -x "${TMP}/.ax/bin/agy-runtime-test"
 check_eq "runtime-install" "${got_rt}" \
   "[\"--add-dir=${TMP}\", \"--dangerously-skip-permissions\", \"--print=Reply with MOCK_OK.\"]"
+
+# 7c. A resumed run reuses the installed agy instead of downloading again.
+run_runtime AGY_RUNTIME_INSTALL=true >/dev/null
+test "$(cat "${FAKE_HOME}/installed_versions.txt")" = "1.5.7"
+rm -rf "${TMP}/.ax"
+
+# 7d. Without AGY_VERSION, the installer gets an empty version (its pin).
+rm -f "${FAKE_HOME}/installed_versions.txt"
+run_runtime AGY_RUNTIME_INSTALL=true >/dev/null
+test "$(cat "${FAKE_HOME}/installed_versions.txt")" = ""
+rm -rf "${TMP}/.ax"
+
+# 7e. install-agy.sh refuses versions without a pinned checksum, before any
+#     download (the base URL points at a closed port).
+for v in latest 9.9.9; do
+  set +e
+  AGY_GCS_BASE_URL="http://127.0.0.1:9" "${DIR}/install-agy.sh" "${v}" "${TMP}/never" >/dev/null 2>&1
+  rc=$?
+  set -e
+  test "${rc}" -eq 1
+  test ! -e "${TMP}/never"
+done
 
 # 8. Empty goal file fails with exit code 2.
 : >"${TMP}/empty.md"

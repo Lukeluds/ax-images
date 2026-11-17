@@ -14,44 +14,49 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Installs a released Antigravity CLI (agy) binary for the current Linux
-# platform (glibc), verifying its SHA-512 checksum against the release manifest.
+# Installs a pinned Antigravity CLI (agy) release for the current Linux
+# platform (glibc). The release URL and SHA-512 checksum of every supported
+# version are pinned below, so the only network request is the tarball
+# download and its checksum never comes from the same bucket as the binary.
 #
-#   install-agy.sh [version|latest] [dest-dir]
+#   install-agy.sh [version] [dest-dir]
+#
+# To bump agy, add a case below with the release's execution ID and the
+# SHA-512 of each platform's tarball, computed from the downloaded files, and
+# update PINNED_VERSION.
 
 set -euo pipefail
 
-version="${1:-latest}"
+PINNED_VERSION="1.5.10"
+
+version="${1:-${PINNED_VERSION}}"
 dest="${2:-${HOME:-/root}/.local/bin}"
-UPDATER="${AGY_RELEASE_BASE_URL:-https://antigravity-cli-auto-updater-974169037036.us-central1.run.app}"
 GCS="${AGY_GCS_BASE_URL:-https://storage.googleapis.com/antigravity-public}"
 
 case "$(uname -m)" in
-  x86_64|amd64) platform="linux-x64" ;;
-  aarch64|arm64) platform="linux-arm" ;;
+  x86_64|amd64) platform="linux-x64" tarball="cli_linux_x64.tar.gz" ;;
+  aarch64|arm64) platform="linux-arm" tarball="cli_linux_arm64.tar.gz" ;;
   *)
     echo "install-agy: unsupported architecture $(uname -m)" >&2
     exit 1
     ;;
 esac
 
-releases="$(curl -fsSL "${UPDATER}/releases")"
-if [[ "${version}" == "latest" ]]; then
-  entry="$(jq -c '.[0]' <<<"${releases}")"
-else
-  entry="$(jq -c --arg v "${version}" 'map(select(.version == $v)) | .[0]' <<<"${releases}")"
-fi
-if [[ -z "${entry}" || "${entry}" == "null" ]]; then
-  echo "install-agy: version ${version} not found in ${UPDATER}/releases" >&2
-  exit 1
-fi
+case "${version}" in
+  1.5.10)
+    execution_id="5253791805734912"
+    case "${platform}" in
+      linux-x64) sha512="713ae840845d74736e2d4a96f5d84e3353d614e73a875793ddf500997ccee09595448cebfd8e94fdd90ce2a0fa97707bd1cc29763dcfe01c945d80c92234378f" ;;
+      linux-arm) sha512="f9f5c7ebc47a8b8de536acca8116b1f5a43dca614cde94008fe5a510517b23535fb281d85416930d76e76478858bf3dc66ea6d1b0c9b6eeadcfabe4d8ef2a807" ;;
+    esac
+    ;;
+  *)
+    echo "install-agy: agy ${version} is not pinned in install-agy.sh (pinned: ${PINNED_VERSION})" >&2
+    exit 1
+    ;;
+esac
 
-resolved_version="$(jq -r .version <<<"${entry}")"
-execution_id="$(jq -r .execution_id <<<"${entry}")"
-
-manifest="$(curl -fsSL "${GCS}/antigravity-cli/${resolved_version}-${execution_id}/${platform}/manifest.json")"
-url="$(jq -r .url <<<"${manifest}")"
-sha512="$(jq -r .sha512 <<<"${manifest}")"
+url="${GCS}/antigravity-cli/${version}-${execution_id}/${platform}/${tarball}"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
@@ -62,4 +67,4 @@ tar -xzf "${tmp}/agy.tar.gz" -C "${tmp}" antigravity
 
 mkdir -p "${dest}"
 install -m 0755 "${tmp}/antigravity" "${dest}/agy"
-echo "install-agy: installed agy ${resolved_version} (${platform}) to ${dest}/agy" >&2
+echo "install-agy: installed agy ${version} (${platform}) to ${dest}/agy" >&2

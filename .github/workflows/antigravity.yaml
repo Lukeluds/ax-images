@@ -27,9 +27,9 @@ on:
   workflow_dispatch:
     inputs:
       agy_version:
-        description: 'Antigravity CLI version (e.g. latest or 1.5.7)'
+        description: 'Antigravity CLI version pinned in install-agy.sh (empty uses the pinned default)'
         required: false
-        default: 'latest'
+        default: ''
         type: string
 
 concurrency:

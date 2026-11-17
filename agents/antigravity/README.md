@@ -24,10 +24,19 @@ invokes `/usr/local/bin/ax-harness` with `/workspace` as the working directory
   - When `AGY_ADC_AUTH=true`, `agy` authenticates via Application Default Credentials against `GOOGLE_CLOUD_PROJECT` (Vertex AI).
 - **Egress TLS trust bundle:** When `/run/ate/egress-trust-bundle/trust-bundle.pem` is mounted by Agent Substrate, `ax-harness` defaults `SSL_CERT_FILE` and `CURL_CA_BUNDLE` to it so both runtime installation (`curl`) and `agy` trust the egress gateway's TLS certificate during HTTPS credential injection.
 
+## Pinned `agy` Version
+
+`install-agy.sh` pins the `agy` version (`PINNED_VERSION`) along with each
+platform's release URL and SHA-512 checksum. The only network request is the
+tarball download from `storage.googleapis.com`, and the checksum never comes
+from the same bucket as the binary. Versions that are not pinned (including
+`latest`) are rejected. To bump `agy`, add the new release's execution ID and
+the SHA-512 of each platform's tarball (computed from the downloaded files).
+
 ## Runtime vs. Pre-Installed Builds
 
-- **Default (`PREINSTALL_AGY=false`):** Ships Debian packages, `/usr/local/share/ax/install-agy.sh`, and `/usr/local/bin/ax-harness` (no `agy` binary bundled in the image). When `agy` is missing at container startup, `ax-harness` installs `AGY_VERSION` (default `latest`) with SHA-512 verification.
-- **Optional pre-installed build (`--build-arg PREINSTALL_AGY=true`):** Installs `agy` during `docker build` for local or airgapped E2E environments where internet egress is blocked.
+- **Default (`PREINSTALL_AGY=false`):** Ships Debian packages, `/usr/local/share/ax/install-agy.sh`, and `/usr/local/bin/ax-harness` (no `agy` binary bundled in the image). A task must opt in to runtime installation with `AGY_RUNTIME_INSTALL=true`, which installs the pinned `agy` into `/workspace/.ax/bin` (so a resumed sandbox reuses it) and needs egress to `storage.googleapis.com`. Without the opt-in, a missing `agy` fails the task with exit code `127`.
+- **Optional pre-installed build (`--build-arg PREINSTALL_AGY=true`):** Installs the pinned `agy` during `docker build` for local or airgapped E2E environments where internet egress is blocked.
 
 ## Local Test
 
