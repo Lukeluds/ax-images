@@ -234,17 +234,20 @@ snapshotConfig:
   preferredFidelity: SNAPSHOT_FIDELITY_VOLUMES
 EOF
 
-  "${KATE[@]}" create actor-template -f "${tmpl_file}" >/dev/null 2>&1
+  if ! "${KATE[@]}" create actor-template -f "${tmpl_file}" >/dev/null; then
+    rm -f "${tmpl_file}"
+    return 1
+  fi
   rm -f "${tmpl_file}"
-  "${KATE[@]}" create actor "${actor}" -a default --template "${tmpl}" >/dev/null 2>&1
+  "${KATE[@]}" create actor "${actor}" -a default --template "${tmpl}" >/dev/null
 
   if [[ "${policy_mode}" == "http" ]]; then
-    "${KATE[@]}" create egress-policy "${actor}" -a default -f "${SCRIPT_DIR}/k8s/egress-policy-http.yaml" >/dev/null 2>&1
+    "${KATE[@]}" create egress-policy "${actor}" -a default -f "${SCRIPT_DIR}/k8s/egress-policy-http.yaml" >/dev/null
   elif [[ "${policy_mode}" == "inject" ]]; then
-    "${KATE[@]}" create egress-policy "${actor}" -a default -f "${SCRIPT_DIR}/k8s/egress-policy-inject.yaml" >/dev/null 2>&1
+    "${KATE[@]}" create egress-policy "${actor}" -a default -f "${SCRIPT_DIR}/k8s/egress-policy-inject.yaml" >/dev/null
   fi
 
-  "${KATE[@]}" resume actor "${actor}" -a default >/dev/null 2>&1
+  "${KATE[@]}" resume actor "${actor}" -a default >/dev/null
 }
 
 PASS=0
