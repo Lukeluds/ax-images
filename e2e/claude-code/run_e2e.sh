@@ -245,7 +245,7 @@ check() {
 }
 
 STD_GOAL="Reply with exactly the text you receive from the model."
-STD_CFG='{"prompt":"Reply with exactly the text you receive from the model.","model":"claude-mock","maxTurns":3,"dangerouslySkipPermissions":true}'
+STD_CFG='{"model":"claude-mock","maxTurns":3,"dangerouslySkipPermissions":true}'
 
 echo "=== Case 1: Happy path (Anthropic x-api-key) ==="
 reset_mock
@@ -406,7 +406,7 @@ echo "=== Case 7: Scripted Write tool_use (/workspace file write) ==="
 reset_mock
 curl -fsS -X POST "${MOCK_LOCAL}/_mock/config" -H "content-type: application/json" \
   -d '{"tool_write_path":"/workspace/tool_ok.txt","tool_write_content":"HELLO_FROM_CLAUDE_TOOL"}' >/dev/null
-TOOL_CFG='{"prompt":"Write a file as instructed.","model":"claude-mock","maxTurns":5,"dangerouslySkipPermissions":true}'
+TOOL_CFG='{"model":"claude-mock","maxTurns":5,"dangerouslySkipPermissions":true}'
 start_mounted_case "tool-$$" "inject" "Write a file as instructed." "${TOOL_CFG}" \
 "/usr/local/bin/ax-harness && printf \"TOOL_FILE_VALUE=%s\\n\" \"\$(cat /workspace/tool_ok.txt)\"" \
 "        - name: ANTHROPIC_BASE_URL
