@@ -21,7 +21,7 @@ read-only at `/opt/ax` (`ImageVolumeSource`), tested against an in-cluster
 - `kubectl` and `kubectl-ate` on `PATH` (or `KUBECTL_ATE` set).
 - Either an adjacent `ax` checkout (`AX_DIR`, default `../ax`) to cross-compile the static `ax-task-runner`, or `RUNNER_DIGEST` pointing to a pre-pushed runner volume image.
 
-## Running
+## Running (Hermetic `mock-gemini` Suite)
 
 ```bash
 ./e2e/antigravity/run_e2e.sh
@@ -30,3 +30,26 @@ read-only at `/opt/ax` (`ImageVolumeSource`), tested against an in-cluster
 Optional environment overrides: `AX_DIR`, `KUBECONFIG`, `KUBECTL_ATE`,
 `LOCAL_REGISTRY` (default `localhost:5001`), `MOCK_DIGEST`, `AGY_DIGEST`, and
 `RUNNER_DIGEST`.
+
+## Running (Opt-In Live Gemini API Suite)
+
+To exercise the default `PREINSTALL_AGY=false` image end-to-end against real
+`generativelanguage.googleapis.com` (including runtime `install-agy.sh` download
+via `tlsPassthrough`, Substrate HTTPS MITM CA trust bundle auto-wiring, and
+gateway `x-goog-api-key` credential injection on the `ax` hero-demo task):
+
+1. Store a Gemini API key in the allowed credential namespace (never commit or
+   pass the real key inside the container):
+   ```bash
+   kubectl -n ax-test create secret generic real-gemini \
+     --from-literal=api-key="YOUR_GEMINI_API_KEY"
+   ```
+2. Run:
+   ```bash
+   ./e2e/antigravity/run_real_gemini_e2e.sh
+   ```
+
+Optional environment overrides: `GEMINI_SECRET_NAMESPACE` (default `ax-test`),
+`GEMINI_SECRET_NAME` (default `real-gemini`), `GEMINI_SECRET_KEY` (default
+`api-key`), `PREINSTALL_AGY` (default `false`), `AGY_DIGEST`, `RUNNER_DIGEST`,
+and `TIMEOUT_S` (default `180`).
