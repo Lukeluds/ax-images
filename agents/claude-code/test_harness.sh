@@ -23,7 +23,6 @@ trap 'rm -rf "${TMP}"' EXIT
 printf 'Reply with MOCK_OK.' >"${TMP}/goal.md"
 cat >"${TMP}/config.json" <<'EOF'
 {
-  "prompt": "Reply with MOCK_OK.",
   "model": "claude-mock",
   "maxTurns": 3,
   "dangerouslySkipPermissions": true,
@@ -32,8 +31,9 @@ cat >"${TMP}/config.json" <<'EOF'
   "settings": {"includeCoAuthoredBy": false}
 }
 EOF
+printf '{"mcpServers":{"docs":{"type":"http","url":"http://docs.local/mcp"}}}' >"${TMP}/mcp.json"
+printf '{"mcpServers":{}}' >"${TMP}/mcp-empty.json"
 
-# 1. Pre-installed binary: translates spec.config into sorted claude --print flags
 cat >"${TMP}/fake-claude" <<'EOF'
 #!/usr/bin/env python3
 import json, sys
@@ -41,27 +41,46 @@ print(json.dumps(sys.argv[1:]))
 EOF
 chmod +x "${TMP}/fake-claude"
 
-got="$(AX_GOAL_FILE="${TMP}/goal.md" AX_CONFIG_FILE="${TMP}/config.json" \
-  CLAUDE_BIN="${TMP}/fake-claude" "${DIR}/ax-harness")"
-
-python3 - "${got}" <<'EOF'
-import json, sys
+# expect_args <json> <python list literal>
+expect_args() {
+  python3 - "$1" "$2" <<'EOF'
+import ast, json, sys
 got = json.loads(sys.argv[1])
-want = [
-    "--print",
-    "--allowed-tools=Bash",
-    "--allowed-tools=Edit",
-    "--dangerously-skip-permissions",
-    "--max-turns=3",
-    "--model=claude-mock",
-    '--settings={"includeCoAuthoredBy":false}',
-    "--",
-    "Reply with MOCK_OK.",
-]
+want = ast.literal_eval(sys.argv[2])
 assert got == want, f"got {got!r}, want {want!r}"
 EOF
+}
 
-# 2. Runtime install fallback: installs into $HOME/.local/bin when missing
+# 1. Goal file as-is, spec.config translated to sorted flags, MCP servers
+#    passed with --mcp-config, and the answer written to AX_OUTPUT_FILE.
+got="$(AX_GOAL_FILE="${TMP}/goal.md" AX_CONFIG_FILE="${TMP}/config.json" \
+  AX_MCP_CONFIG_FILE="${TMP}/mcp.json" AX_OUTPUT_FILE="${TMP}/ws/.ax/output" \
+  CLAUDE_BIN="${TMP}/fake-claude" "${DIR}/ax-harness")"
+want="[
+    '--print',
+    '--allowed-tools=Bash',
+    '--allowed-tools=Edit',
+    '--dangerously-skip-permissions',
+    '--max-turns=3',
+    '--model=claude-mock',
+    '--settings={\"includeCoAuthoredBy\":false}',
+    '--mcp-config=${TMP}/mcp.json',
+    '--',
+    'Reply with MOCK_OK.',
+]"
+expect_args "${got}" "${want}"
+expect_args "$(cat "${TMP}/ws/.ax/output")" "${want}"
+
+# 2. Empty or missing mcpServers adds no flag; without AX_OUTPUT_FILE only stdout is used.
+got="$(AX_GOAL_FILE="${TMP}/goal.md" AX_MCP_CONFIG_FILE="${TMP}/mcp-empty.json" \
+  CLAUDE_BIN="${TMP}/fake-claude" "${DIR}/ax-harness")"
+expect_args "${got}" "['--print', '--', 'Reply with MOCK_OK.']"
+
+got="$(AX_GOAL_FILE="${TMP}/goal.md" AX_MCP_CONFIG_FILE="${TMP}/does-not-exist.json" \
+  CLAUDE_BIN="${TMP}/fake-claude" "${DIR}/ax-harness")"
+expect_args "${got}" "['--print', '--', 'Reply with MOCK_OK.']"
+
+# 3. Runtime install fallback: installs into $HOME/.local/bin when missing
 FAKE_HOME="${TMP}/home"
 mkdir -p "${FAKE_HOME}"
 cat >"${TMP}/mock-install.sh" <<'EOF'
@@ -85,20 +104,42 @@ got_rt="$(HOME="${FAKE_HOME}" \
   "${DIR}/ax-harness" 2>/dev/null)"
 
 test "$(cat "${FAKE_HOME}/installed_version.txt")" = "2.1.322"
-python3 - "${got_rt}" <<'EOF'
-import json, sys
-got = json.loads(sys.argv[1])
-want = ["--print", "--", "Reply with MOCK_OK."]
-assert got == want, f"got {got!r}, want {want!r}"
-EOF
+expect_args "${got_rt}" "['--print', '--', 'Reply with MOCK_OK.']"
 
-# 3. Empty goal file fails with exit code 2
+# expect_rc <want> <env...>: runs ax-harness and checks its exit code.
+expect_rc() {
+  local want="$1" rc
+  shift
+  set +e
+  env "$@" "${DIR}/ax-harness" >/dev/null 2>&1
+  rc=$?
+  set -e
+  test "${rc}" -eq "${want}" || { echo "got exit ${rc}, want ${want} for: $*" >&2; exit 1; }
+}
+
+# 4. Empty goal file fails with exit code 2
 : >"${TMP}/empty.md"
-set +e
-AX_GOAL_FILE="${TMP}/empty.md" CLAUDE_BIN="${TMP}/fake-claude" \
-  "${DIR}/ax-harness" >/dev/null 2>&1
-rc=$?
-set -e
-test "${rc}" -eq 2
+expect_rc 2 AX_GOAL_FILE="${TMP}/empty.md" CLAUDE_BIN="${TMP}/fake-claude"
+
+# 5. spec.config.prompt is rejected (the prompt comes from spec.goal.text)
+printf '{"prompt":"hi"}' >"${TMP}/prompt.json"
+expect_rc 2 AX_GOAL_FILE="${TMP}/goal.md" AX_CONFIG_FILE="${TMP}/prompt.json" \
+  CLAUDE_BIN="${TMP}/fake-claude"
+
+# 6. Invalid spec.config fails the launcher instead of dropping flags
+printf '{"bad_key":1}' >"${TMP}/bad.json"
+expect_rc 2 AX_GOAL_FILE="${TMP}/goal.md" AX_CONFIG_FILE="${TMP}/bad.json" \
+  CLAUDE_BIN="${TMP}/fake-claude"
+
+# 7. claude's exit code is kept when the answer is teed to AX_OUTPUT_FILE
+cat >"${TMP}/failing-claude" <<'EOF'
+#!/usr/bin/env bash
+echo "partial answer"
+exit 7
+EOF
+chmod +x "${TMP}/failing-claude"
+expect_rc 7 AX_GOAL_FILE="${TMP}/goal.md" AX_OUTPUT_FILE="${TMP}/fail/output" \
+  CLAUDE_BIN="${TMP}/failing-claude"
+test "$(cat "${TMP}/fail/output")" = "partial answer"
 
 echo "ALL AX-HARNESS TESTS PASSED"

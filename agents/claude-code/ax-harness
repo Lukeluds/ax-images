@@ -17,9 +17,16 @@
 # ax-harness: Claude Code launcher for the AX in-container wrapper contract.
 #
 # Inputs provided by the mounted AX runner:
-#   AX_GOAL_FILE    path to the task's goal (spec.config.prompt)
-#   AX_CONFIG_FILE  optional path to spec.config serialized as JSON
-#   cwd             the task's workspace
+#   AX_GOAL_FILE        path to the task's goal (spec.goal.text), passed to
+#                       claude as the prompt as-is
+#   AX_CONFIG_FILE      optional path to spec.config serialized as JSON
+#   AX_MCP_CONFIG_FILE  optional path to the Workspace's MCP servers in the
+#                       {"mcpServers": {...}} format
+#   AX_OUTPUT_FILE      optional path the agent's answer is written to; AX
+#                       reports it as status.outcome.output
+#   cwd                 the task's workspace
+#
+# AX_SESSION_FILE is not used yet.
 #
 # Optional environment variables:
 #   CLAUDE_CODE_VERSION        version passed to install.sh on runtime install
@@ -31,9 +38,11 @@ set -euo pipefail
 
 goal_file="${AX_GOAL_FILE:?AX_GOAL_FILE is not set; ax-harness must be started by the AX runner}"
 config_file="${AX_CONFIG_FILE:-}"
+mcp_file="${AX_MCP_CONFIG_FILE:-}"
+output_file="${AX_OUTPUT_FILE:-}"
 
 if [[ ! -s "${goal_file}" ]]; then
-  echo "ax-harness: empty goal in ${goal_file}; set spec.config.prompt" >&2
+  echo "ax-harness: empty goal in ${goal_file}; set spec.goal.text" >&2
   exit 2
 fi
 
@@ -53,18 +62,26 @@ if ! command -v "${CLAUDE_BIN}" >/dev/null 2>&1; then
   exit 127
 fi
 
-mapfile -d '' -t flag_args < <(python3 - "${config_file}" << 'PY'
+# Translate spec.config (and the MCP servers) into claude flags. The flags go
+# through a file rather than process substitution so that a bad spec.config
+# fails the launcher instead of silently dropping flags.
+flags_file="$(mktemp)"
+trap 'rm -f "${flags_file}"' EXIT
+if ! python3 - "${config_file}" "${mcp_file}" >"${flags_file}" << 'PY'
 import json
+import os
 import re
 import sys
 
-cfg_path = sys.argv[1] if len(sys.argv) > 1 else ""
-cfg = {}
-if cfg_path:
-    with open(cfg_path, "r", encoding="utf-8") as f:
+cfg_path, mcp_path = sys.argv[1], sys.argv[2]
+
+
+def load(path, *, allow_missing=False):
+    if not path or (allow_missing and not os.path.isfile(path)):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
         raw = f.read().strip()
-        if raw:
-            cfg = json.loads(raw)
+    return json.loads(raw) if raw else {}
 
 
 def to_flag(key: str) -> str:
@@ -74,8 +91,14 @@ def to_flag(key: str) -> str:
     return "--" + kebab
 
 
+cfg = load(cfg_path)
+if not isinstance(cfg, dict):
+    raise ValueError("spec.config must be a JSON object")
+if "prompt" in cfg:
+    raise ValueError("spec.config.prompt is not supported; set spec.goal.text")
+
 out = []
-for key in sorted(k for k in cfg if k != "prompt"):
+for key in sorted(cfg):
     val = cfg[key]
     flag = to_flag(key)
     if isinstance(val, bool):
@@ -95,9 +118,25 @@ for key in sorted(k for k in cfg if k != "prompt"):
     elif val is not None:
         raise ValueError(f"spec.config.{key}: unsupported value {val!r}")
 
+if (load(mcp_path, allow_missing=True) or {}).get("mcpServers"):
+    out.append(f"--mcp-config={mcp_path}")
+
 for item in out:
     sys.stdout.buffer.write(item.encode("utf-8") + b"\0")
 PY
-)
+then
+  echo "ax-harness: invalid spec.config in ${config_file:-<unset>}" >&2
+  exit 2
+fi
+mapfile -d '' -t flag_args <"${flags_file}"
 
-exec "${CLAUDE_BIN}" --print "${flag_args[@]}" -- "$(cat "${goal_file}")"
+goal="$(cat "${goal_file}")"
+
+if [[ -z "${output_file}" ]]; then
+  exec "${CLAUDE_BIN}" --print "${flag_args[@]}" -- "${goal}"
+fi
+
+# Print the answer to the task's log as before and also keep it in
+# AX_OUTPUT_FILE. pipefail keeps claude's exit code.
+mkdir -p "$(dirname "${output_file}")"
+"${CLAUDE_BIN}" --print "${flag_args[@]}" -- "${goal}" | tee "${output_file}"
