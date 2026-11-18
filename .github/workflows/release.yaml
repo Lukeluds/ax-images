@@ -95,11 +95,10 @@ env:
     }
   # Release image catalog. Entries whose <context>/Dockerfile is not yet on the
   # checked-out commit are skipped unless explicitly requested via inputs.images.
-  # antigravity is intentionally omitted until the runner/licensing question
-  # settles.
+  # claude-code is intentionally excluded (paused; #12), and antigravity is
+  # omitted until the runner/licensing question settles (#15).
   IMAGE_CATALOG: |
     [
-      {"name": "claude-code", "context": "agents/claude-code"},
       {"name": "mock-anthropic", "context": "fakes/mock-anthropic"},
       {"name": "mock-gemini", "context": "fakes/mock-gemini"}
     ]
