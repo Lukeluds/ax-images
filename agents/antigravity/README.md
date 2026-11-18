@@ -5,6 +5,79 @@ headless [Antigravity CLI (`agy`)](https://antigravity.google/docs/cli/install)
 tasks under the AX in-container wrapper contract. Contains no AX runner binary
 (`ax-task-runner` is mounted read-only by AX at `/opt/ax`).
 
+## Requirement: AX Runner Volume
+
+This image has no `ax-task-runner`, so it only starts as an AX task when
+ax-server mounts a runner volume image: `ax install --runner-volume-image=...`
+or `AX_RUNNER_VOLUME_IMAGE` on ax-server. Release manifests may leave it empty
+(google/ax#625). Without it, AX runs `/usr/local/bin/ax-task-runner`, which
+this image doesn't have, and the task fails to start.
+
+## Example Task (default image)
+
+The default image has no `agy` binary, so the task opts in to the runtime
+install and its Gateway allows `storage.googleapis.com` alongside the Gemini
+API. The Gateway adds the real API key outside the sandbox; the task only sees
+a placeholder. The Secret setup is described under "Injecting credentials" in
+google/ax's `docs/manifests.md`.
+
+```yaml
+apiVersion: ax.io/v1alpha1
+kind: Gateway
+metadata:
+  name: antigravity-gw
+  atespace: default
+spec:
+  egress:
+    - tlsPassthrough:
+        hostnames: ["storage.googleapis.com"] # runtime agy install
+        ports:
+          numbers: [443]
+    - https:
+        hostnames: ["generativelanguage.googleapis.com"]
+        effects:
+          replaceHeaders:
+            - header: x-goog-api-key
+              credentialUri: "ate-secret://k8s.io/default/<namespace>/<secret>/api-key"
+---
+apiVersion: ax.io/v1alpha1
+kind: Task
+metadata:
+  name: antigravity-example
+  atespace: default
+spec:
+  profile:
+    image: "ghcr.io/agentexecutor/antigravity@sha256:<digest>"
+    resources:
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+  gateway:
+    name: antigravity-gw
+  env:
+    - name: AGY_RUNTIME_INSTALL
+      value: "true"
+    - name: GEMINI_API_KEY
+      value: placeholder # replaced outside the sandbox by antigravity-gw
+  goal:
+    text: "Create /workspace/hello.py that prints hello, and run it."
+```
+
+The answer is reported as the task's `status.outcome.output`.
+
+## Interactive Use (`ax ssh`)
+
+An `ax ssh` session never runs the launcher, so it gets none of the setup
+`ax-harness` does. With the default image, install `agy` once per workspace;
+the image already puts `/workspace/.ax/bin` on `PATH`, so a copy installed by
+an earlier goal task is found as well:
+
+```bash
+/usr/local/share/ax/install-agy.sh "" /workspace/.ax/bin
+export SSL_CERT_FILE=/run/ate/egress-trust-bundle/trust-bundle.pem  # trust the egress gateway
+agy --settings='{"modelProvider":"gemini"}'                         # with GEMINI_API_KEY set
+```
+
 ## Launcher Contract (`/usr/local/bin/ax-harness`)
 
 The mounted AX runner prepares `/workspace`, writes task inputs to files, and

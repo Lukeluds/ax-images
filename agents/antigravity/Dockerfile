@@ -48,5 +48,10 @@ RUN chmod 0755 /usr/local/share/ax/install-agy.sh \
 ENV AGY_CLI_DISABLE_AUTO_UPDATE=true \
     AGY_VERSION="${AGY_VERSION}"
 
+# ax-harness installs agy at runtime into <workspace>/.ax/bin. Putting the
+# default workspace's copy on PATH lets `ax ssh` sessions, which never run the
+# launcher, find it too. Tasks that change the workspace path don't get this.
+ENV PATH="/workspace/.ax/bin:${PATH}"
+
 COPY ax-harness /usr/local/bin/ax-harness
 RUN chmod 0755 /usr/local/bin/ax-harness
