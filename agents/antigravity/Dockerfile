@@ -37,7 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # and a label. It must equal PINNED_VERSION in install-agy.sh (CI checks
 # this), so bump both together.
 ARG AGY_VERSION=1.5.10
-ARG PREINSTALL_AGY=false
+ARG PREINSTALL_AGY=true
 
 COPY install-agy.sh /usr/local/share/ax/install-agy.sh
 RUN chmod 0755 /usr/local/share/ax/install-agy.sh \

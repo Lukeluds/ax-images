@@ -115,8 +115,8 @@ downloaded files), then update `PINNED_VERSION` and `ARG AGY_VERSION`.
 
 ## Builds: Runtime Install vs. Bundled
 
-- **Runtime install (`PREINSTALL_AGY=false`, current default):** Ships Debian packages, `/usr/local/share/ax/install-agy.sh`, and `/usr/local/bin/ax-harness`, with no `agy` binary. A task must opt in with `AGY_RUNTIME_INSTALL=true`, which installs the pinned `agy` into `/workspace/.ax/bin` (so a resumed sandbox reuses it) and needs egress to `storage.googleapis.com`. Without the opt-in, a missing `agy` fails the task with exit code `127`.
-- **Bundled (`PREINSTALL_AGY=true`):** Installs the pinned `agy` into `/usr/local/bin` during `docker build`, so tasks need no extra egress and `ax ssh` sessions have `agy` right away. An `agy` in the image always wins over a runtime install left in the workspace.
+- **Runtime install (`PREINSTALL_AGY=false`):** Ships Debian packages, `/usr/local/share/ax/install-agy.sh`, and `/usr/local/bin/ax-harness`, with no `agy` binary. A task must opt in with `AGY_RUNTIME_INSTALL=true`, which installs the pinned `agy` into `/workspace/.ax/bin` (so a resumed sandbox reuses it) and needs egress to `storage.googleapis.com`. Without the opt-in, a missing `agy` fails the task with exit code `127`.
+- **Bundled (`PREINSTALL_AGY=true`, current default):** Installs the pinned `agy` into `/usr/local/bin` during `docker build`, so tasks need no extra egress and `ax ssh` sessions have `agy` right away. An `agy` in the image always wins over a runtime install left in the workspace.
 
 **Published images are always runtime-install for now:** `release.yaml` builds
 `antigravity` with `PREINSTALL_AGY=false` until shipping the `agy` binary in a
