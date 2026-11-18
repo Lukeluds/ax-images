@@ -10,7 +10,8 @@ to them is proposed, reviewed and recorded like any other change.
 | Ruleset | Applies to | Rules | Who can bypass |
 |---|---|---|---|
 | [`Protect main`](../.github/rulesets/protect-main.json) | `main` (`~DEFAULT_BRANCH`) | No deletion or force-push. Changes go through a pull request with 1 approving review, and a new push clears earlier approvals. The `License headers` check must pass. | Organization admins |
-| [`protect-tags`](../.github/rulesets/protect-tags.json) | All tags | Tags can't be created, moved or deleted, and names must match `vMAJOR.MINOR.PATCH[-PRERELEASE]`. | Repository admins, who are the only ones able to push a release tag |
+| [`protect-tags-create`](../.github/rulesets/protect-tags-create.json) | All tags | Tags can't be created. | Repository admins, who are the only ones able to push a release tag |
+| [`protect-tags-immutable`](../.github/rulesets/protect-tags-immutable.json) | All tags | Once created, a tag can't be moved or deleted, and names must match `vMAJOR.MINOR.PATCH[-PRERELEASE]`. | Nobody |
 
 The JSON files are the source of truth. If this table and a file disagree, the
 file wins.
