@@ -14,12 +14,13 @@
 
 # Pure Antigravity (agy) agent image for AX: no AX runner baked in.
 #
-# By default (PREINSTALL_AGY=false), the built image contains only Debian
-# packages, /usr/local/share/ax/install-agy.sh, and /usr/local/bin/ax-harness,
-# which installs the pinned Antigravity CLI on startup only when a task sets
-# AGY_RUNTIME_INSTALL=true. Pass
-# --build-arg PREINSTALL_AGY=true for local or airgapped builds where agy
-# should be pre-installed at build time.
+# By default (PREINSTALL_AGY=true), the image installs the pinned Antigravity
+# CLI into /usr/local/bin at build time, alongside Debian packages,
+# /usr/local/share/ax/install-agy.sh, and /usr/local/bin/ax-harness. Pass
+# --build-arg PREINSTALL_AGY=false for a runtime-install image with no agy
+# binary, where ax-harness installs the pinned agy on startup only when a task
+# sets AGY_RUNTIME_INSTALL=true. Published images are runtime-install builds
+# until shipping the agy binary is cleared (see release.yaml).
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
