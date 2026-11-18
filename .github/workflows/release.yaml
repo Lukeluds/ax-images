@@ -80,7 +80,25 @@ env:
   # returns 0 if it exists, returns 1 if the registry reports it missing, and
   # fails the step on any other error (auth, rate limit, network), so a
   # transient error never rebuilds and replaces a published image.
+  #
+  # ghcr.io answers DENIED, not NAME_UNKNOWN, for a package that was never
+  # pushed, so a denied ghcr.io reference is resolved through the packages API
+  # (as in google/ax hack/release/publish-images.sh): 404 for both the org and
+  # user namespace means missing; anything else is an error.
   EXISTING_DIGEST_SH: |
+    ghcr_package_missing() {
+      local path="${1#ghcr.io/}"
+      path="${path%%[:@]*}"
+      local owner="${path%%/*}" name="${path#*/}"
+      local code kind
+      for kind in orgs users; do
+        code="$(gh api -i "${kind}/${owner}/packages/container/${name//\//%2F}" 2>/dev/null \
+          | awk 'NR == 1 { print $2 }' || true)"
+        [[ "${code}" == 404 ]] && continue
+        return 1
+      done
+      return 0
+    }
     existing_digest() {
       local out
       if out="$(docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' 2>&1)"; then
@@ -90,15 +108,24 @@ env:
       if [[ "${out}" == *": not found"* || "${out}" == *"MANIFEST_UNKNOWN"* || "${out}" == *"NAME_UNKNOWN"* ]]; then
         return 1
       fi
+      if [[ "$1" == ghcr.io/* && "${out}" == *"DENIED"* ]] && ghcr_package_missing "$1"; then
+        return 1
+      fi
       echo "::error::Cannot check whether $1 exists: ${out}" >&2
       exit 2
     }
   # Release image catalog. Entries whose <context>/Dockerfile is not yet on the
   # checked-out commit are skipped unless explicitly requested via inputs.images.
-  # claude-code is intentionally excluded (paused; #12), and antigravity is
-  # omitted until the runner/licensing question settles (#15).
+  # An entry's optional build_args are passed to docker buildx build as
+  # --build-arg KEY=VALUE.
+  #
+  # claude-code is intentionally excluded (paused; #12). antigravity is built
+  # with PREINSTALL_AGY=false so a published image never bundles the agy
+  # binary, whatever the Dockerfile's default is, until the licensing question
+  # in #15 is answered.
   IMAGE_CATALOG: |
     [
+      {"name": "antigravity", "context": "agents/antigravity", "build_args": {"PREINSTALL_AGY": "false"}},
       {"name": "mock-anthropic", "context": "fakes/mock-anthropic"},
       {"name": "mock-gemini", "context": "fakes/mock-gemini"}
     ]
@@ -191,6 +218,7 @@ jobs:
     env:
       NAME: ${{ matrix.name }}
       CONTEXT: ${{ matrix.context }}
+      BUILD_ARGS: ${{ toJSON(matrix.build_args) }}
       PLATFORMS: linux/amd64,linux/arm64
     steps:
       - name: Checkout
@@ -220,8 +248,15 @@ jobs:
         run: echo "${TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
 
       - name: Build and push ${{ matrix.name }}
+        env:
+          # Lets ghcr_package_missing query the packages API.
+          GH_TOKEN: ${{ github.token }}
         run: |
           eval "${EXISTING_DIGEST_SH}"
+          build_args=()
+          while IFS= read -r arg; do
+            [[ -n "${arg}" ]] && build_args+=(--build-arg "${arg}")
+          done < <(jq -r '(. // {}) | to_entries[] | "\(.key)=\(.value)"' <<<"${BUILD_ARGS}")
           revision="$(git rev-parse HEAD)"
           ref="${IMAGE_REPO}/${NAME}:${TAG}"
           digest=""
@@ -235,9 +270,10 @@ jobs:
             echo "==> ${ref} already exists (${digest}); not rebuilding"
           else
             metadata="$(mktemp)"
-            echo "==> Building and pushing ${ref} (${PLATFORMS}) from ${CONTEXT}"
+            echo "==> Building and pushing ${ref} (${PLATFORMS}) from ${CONTEXT} ${build_args[*]}"
             docker buildx build \
               --platform "${PLATFORMS}" \
+              "${build_args[@]}" \
               --tag "${ref}" \
               --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
               --label "org.opencontainers.image.version=${TAG}" \
