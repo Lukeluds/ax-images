@@ -51,7 +51,9 @@ fi
 
 export HOME="${HOME:-/root}"
 install_dir="${AGY_INSTALL_DIR:-${PWD}/.ax/bin}"
-export PATH="${install_dir}:${HOME}/.local/bin:${PATH}"
+# Appended, so an agy installed in the image always wins over a leftover
+# runtime install in the workspace.
+export PATH="${PATH}:${HOME}/.local/bin:${install_dir}"
 export AGY_CLI_DISABLE_AUTO_UPDATE="${AGY_CLI_DISABLE_AUTO_UPDATE:-true}"
 
 ca_bundle="${AX_CA_BUNDLE:-/run/ate/egress-trust-bundle/trust-bundle.pem}"
