@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ax-harness: Antigravity CLI (agy) launcher for the AX in-container wrapper
+# contract.
+#
+# Inputs provided by the mounted AX runner (see runner/launcher.go in
+# github.com/google/ax):
+#   AX_GOAL_FILE        path to the task's goal (spec.goal.text)
+#   AX_CONFIG_FILE      optional path to spec.config serialized as JSON
+#   AX_MCP_CONFIG_FILE  optional path to the Workspace's MCP servers as
+#                       {"mcpServers": {...}}; each is registered with
+#                       `agy mcp add` before the task runs
+#   AX_OUTPUT_FILE      optional path the agent's final answer is written to
+#                       (AX reports it as status.outcome.output)
+#   cwd                 the task's workspace
+#
+# Optional environment variables:
+#   AGY_RUNTIME_INSTALL  "true" to install agy at startup when the image does
+#                        not include it (needs egress to storage.googleapis.com)
+#   AGY_VERSION          version installed at runtime; must be pinned in
+#                        install-agy.sh (default: install-agy.sh's pinned version)
+#   AGY_INSTALL_DIR      where agy is installed at runtime (default:
+#                        <workspace>/.ax/bin, so a resumed sandbox reuses it)
+#   AGY_INSTALL_SCRIPT   installer script path (default: /usr/local/share/ax/install-agy.sh)
+#   AGY_BIN              binary name or path (default: "agy")
+#   AX_CA_BUNDLE         CA bundle path (default: /run/ate/egress-trust-bundle/trust-bundle.pem)
+
+set -euo pipefail
+
+goal_file="${AX_GOAL_FILE:?AX_GOAL_FILE is not set; ax-harness must be started by the AX runner}"
+config_file="${AX_CONFIG_FILE:-}"
+
+if [[ ! -s "${goal_file}" ]]; then
+  echo "ax-harness: empty goal in ${goal_file}; set spec.goal.text" >&2
+  exit 2
+fi
+
+export HOME="${HOME:-/root}"
+install_dir="${AGY_INSTALL_DIR:-${PWD}/.ax/bin}"
+export PATH="${install_dir}:${HOME}/.local/bin:${PATH}"
+export AGY_CLI_DISABLE_AUTO_UPDATE="${AGY_CLI_DISABLE_AUTO_UPDATE:-true}"
+
+ca_bundle="${AX_CA_BUNDLE:-/run/ate/egress-trust-bundle/trust-bundle.pem}"
+if [[ -f "${ca_bundle}" ]]; then
+  export SSL_CERT_FILE="${SSL_CERT_FILE:-${ca_bundle}}"
+  export CURL_CA_BUNDLE="${CURL_CA_BUNDLE:-${ca_bundle}}"
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+AGY_BIN="${AGY_BIN:-agy}"
+if ! command -v "${AGY_BIN}" >/dev/null 2>&1; then
+  if [[ "${AGY_RUNTIME_INSTALL:-}" != "true" ]]; then
+    echo "ax-harness: ${AGY_BIN} not found; use an image built with PREINSTALL_AGY=true or set AGY_RUNTIME_INSTALL=true" >&2
+    exit 127
+  fi
+  default_installer="/usr/local/share/ax/install-agy.sh"
+  if [[ ! -x "${default_installer}" && -x "${SCRIPT_DIR}/install-agy.sh" ]]; then
+    default_installer="${SCRIPT_DIR}/install-agy.sh"
+  fi
+  installer="${AGY_INSTALL_SCRIPT:-${default_installer}}"
+  echo "ax-harness: ${AGY_BIN} not found on PATH; installing agy ${AGY_VERSION:-(pinned)} to ${install_dir}..." >&2
+  "${installer}" "${AGY_VERSION:-}" "${install_dir}"
+fi
+
+if ! command -v "${AGY_BIN}" >/dev/null 2>&1; then
+  echo "ax-harness: ${AGY_BIN} is still not available on PATH after install" >&2
+  exit 127
+fi
+
+# Registers the Workspace's MCP servers. `agy mcp add` adds or updates a
+# server, so re-running on resume is idempotent. Each server is emitted as
+# NUL-delimited `agy mcp add` args followed by an empty terminator.
+mcp_file="${AX_MCP_CONFIG_FILE:-}"
+if [[ -n "${mcp_file}" && -s "${mcp_file}" ]]; then
+  # Written to a file first so a malformed MCP config fails the task under
+  # set -e instead of silently registering nothing.
+  mcp_list="$(mktemp)"
+  python3 - "${mcp_file}" >"${mcp_list}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    servers = (json.load(f) or {}).get("mcpServers") or {}
+if not isinstance(servers, dict):
+    raise ValueError("mcpServers must be an object")
+
+for name in sorted(servers):
+    srv = servers[name] or {}
+    kind = srv.get("type") or ("http" if srv.get("url") else "stdio")
+    if kind == "http" and srv.get("url"):
+        args = ["--type", "http", name, srv["url"]]
+    elif kind == "stdio" and srv.get("command"):
+        args = ["--type", "stdio", name, "--", srv["command"], *map(str, srv.get("args") or [])]
+    else:
+        print(f"ax-harness: skipping MCP server {name!r} with neither url nor command", file=sys.stderr)
+        continue
+    for item in args + [""]:
+        sys.stdout.buffer.write(item.encode("utf-8") + b"\0")
+PY
+  mapfile -d '' -t mcp_args <"${mcp_list}"
+  rm -f "${mcp_list}"
+  server=()
+  for item in "${mcp_args[@]}"; do
+    if [[ -n "${item}" ]]; then
+      server+=("${item}")
+      continue
+    fi
+    echo "ax-harness: registering MCP server ${server[2]}" >&2
+    "${AGY_BIN}" mcp add "${server[@]}" >&2
+    server=()
+  done
+fi
+
+# Prints outputFile (empty string when unset), followed by NUL-delimited agy args.
+mapfile -d '' -t parsed < <(python3 - "${config_file}" "${goal_file}" "${PWD}" <<'PY'
+import json
+import os
+import re
+import sys
+
+cfg_path, goal_path, cwd = sys.argv[1], sys.argv[2], sys.argv[3]
+cfg = {}
+if cfg_path:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        raw = f.read().strip()
+        if raw:
+            cfg = json.loads(raw)
+with open(goal_path, "r", encoding="utf-8") as f:
+    goal = f.read()
+
+
+def to_flag(key: str) -> str:
+    if not re.match(r"^[a-z][a-z0-9]*([A-Z][a-z0-9]+)*$", key):
+        raise ValueError(f"spec.config key {key!r} must be camelCase")
+    return "--" + re.sub(r"([A-Z])", lambda m: "-" + m.group(1).lower(), key)
+
+
+output_file = cfg.pop("outputFile", "") or ""
+cfg.pop("prompt", None)
+
+settings = cfg.pop("settings", None) or {}
+if not isinstance(settings, dict):
+    raise ValueError("spec.config.settings must be an object")
+adc = os.environ.get("AGY_ADC_AUTH", "").strip().lower() in ("1", "true", "on")
+if os.environ.get("GEMINI_API_KEY") and not adc:
+    settings = {"modelProvider": "gemini", **settings}
+
+cfg.setdefault("dangerouslySkipPermissions", True)
+cfg.setdefault("addDir", [cwd])
+
+out = []
+for key in sorted(cfg):
+    val = cfg[key]
+    flag = to_flag(key)
+    if isinstance(val, bool):
+        out.append(flag if val else f"{flag}=false")
+    elif isinstance(val, list):
+        for elem in val:
+            if isinstance(elem, (dict, list, bool)) or elem is None:
+                raise ValueError(
+                    f"spec.config.{key}: list elements must be strings or numbers"
+                )
+            out.append(f"{flag}={elem}")
+    elif isinstance(val, dict):
+        out.append(f"{flag}={json.dumps(val, separators=(',', ':'))}")
+    elif isinstance(val, (str, int, float)):
+        out.append(f"{flag}={val}")
+    elif val is not None:
+        raise ValueError(f"spec.config.{key}: unsupported value {val!r}")
+
+if settings:
+    out.append(f"--settings={json.dumps(settings, separators=(',', ':'))}")
+out.append(f"--print={goal}")
+
+for item in [output_file] + out:
+    sys.stdout.buffer.write(item.encode("utf-8") + b"\0")
+PY
+)
+
+agy_args=("${parsed[@]:1}")
+
+# The answer goes to stdout (logs), to AX_OUTPUT_FILE for AX, and to
+# spec.config.outputFile when set.
+outputs=()
+for f in "${AX_OUTPUT_FILE:-}" "${parsed[0]}"; do
+  if [[ -n "${f}" ]]; then
+    mkdir -p "$(dirname "${f}")"
+    outputs+=("${f}")
+  fi
+done
+
+if [[ "${#outputs[@]}" -eq 0 ]]; then
+  exec "${AGY_BIN}" "${agy_args[@]}"
+fi
+
+set +e
+"${AGY_BIN}" "${agy_args[@]}" | tee "${outputs[@]}"
+status="${PIPESTATUS[0]}"
+set -e
+exit "${status}"
