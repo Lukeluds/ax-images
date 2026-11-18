@@ -1,0 +1,34 @@
+{
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "exclude": [],
+      "include": [
+        "~ALL"
+      ]
+    }
+  },
+  "enforcement": "active",
+  "name": "protect-tags-immutable",
+  "rules": [
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
+    },
+    {
+      "parameters": {
+        "name": "",
+        "negate": false,
+        "operator": "regex",
+        "pattern": "^v\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$"
+      },
+      "type": "tag_name_pattern"
+    },
+    {
+      "type": "update"
+    }
+  ],
+  "target": "tag"
+}
