@@ -49,6 +49,14 @@ jobs:
           persist-credentials: false
       - name: Test ax-harness launcher
         run: agents/antigravity/test_harness.sh
+      - name: Dockerfile AGY_VERSION matches install-agy.sh
+        run: |
+          pinned="$(sed -n 's/^PINNED_VERSION="\(.*\)"$/\1/p' agents/antigravity/install-agy.sh)"
+          arg="$(sed -n 's/^ARG AGY_VERSION=//p' agents/antigravity/Dockerfile)"
+          if [[ -z "${pinned}" || "${pinned}" != "${arg}" ]]; then
+            echo "::error::Dockerfile ARG AGY_VERSION=${arg} must equal PINNED_VERSION=${pinned} in install-agy.sh"
+            exit 1
+          fi
 
   build-and-verify:
     name: Build & verify (${{ matrix.arch }})
@@ -63,43 +71,34 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     env:
-      # Empty builds the version pinned in install-agy.sh.
+      # Empty builds the Dockerfile's AGY_VERSION (the version pinned in
+      # install-agy.sh).
       AGY_VERSION: ${{ inputs.agy_version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Build default runtime-install image (no agy binary baked in)
-        run: |
-          docker build \
-            --build-arg AGY_VERSION="${AGY_VERSION}" \
-            -t "ax-antigravity:runtime-${{ matrix.arch }}" \
-            agents/antigravity
-
-      - name: Verify runtime-install image purity and tools
+      # Both builds are checked explicitly, so the checks don't depend on the
+      # Dockerfile's default. Releases always build PREINSTALL_AGY=false (see
+      # release.yaml) until the licensing question in #15 is answered.
+      - name: Build and verify the runtime-install image (no agy inside)
         run: |
           img="ax-antigravity:runtime-${{ matrix.arch }}"
-          if docker run --rm --entrypoint sh "${img}" -c 'test -e /usr/local/bin/ax-task-runner'; then
-            echo "::error::Agent image must not contain /usr/local/bin/ax-task-runner"
-            exit 1
-          fi
-          if docker run --rm --entrypoint sh "${img}" -c 'command -v agy >/dev/null 2>&1 || test -e /root/.local/bin/agy'; then
-            echo "::error::Default runtime-install image must not bundle the agy binary"
-            exit 1
-          fi
-          docker run --rm --entrypoint test "${img}" -x /usr/local/bin/ax-harness
-          docker run --rm --entrypoint test "${img}" -x /usr/local/share/ax/install-agy.sh
-          docker run --rm --entrypoint git "${img}" --version
-          docker run --rm --entrypoint python3 "${img}" --version
-
-      - name: Verify optional PREINSTALL_AGY=true build (local only, not pushed)
-        run: |
-          img="ax-antigravity:prebaked-${{ matrix.arch }}"
           docker build \
-            --build-arg PREINSTALL_AGY=true \
-            --build-arg AGY_VERSION="${AGY_VERSION}" \
+            --build-arg PREINSTALL_AGY=false \
+            ${AGY_VERSION:+--build-arg "AGY_VERSION=${AGY_VERSION}"} \
             -t "${img}" \
             agents/antigravity
-          docker run --rm --entrypoint agy "${img}" --version
+          agents/antigravity/verify_image.sh "${img}" runtime
+
+      - name: Build and verify the bundled image (pinned agy inside, not pushed)
+        run: |
+          img="ax-antigravity:bundled-${{ matrix.arch }}"
+          docker build \
+            --build-arg PREINSTALL_AGY=true \
+            ${AGY_VERSION:+--build-arg "AGY_VERSION=${AGY_VERSION}"} \
+            -t "${img}" \
+            agents/antigravity
+          agents/antigravity/verify_image.sh "${img}" bundled
           docker rmi "${img}" >/dev/null

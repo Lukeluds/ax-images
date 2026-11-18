@@ -13,12 +13,13 @@ or `AX_RUNNER_VOLUME_IMAGE` on ax-server. Release manifests may leave it empty
 (google/ax#625). Without it, AX runs `/usr/local/bin/ax-task-runner`, which
 this image doesn't have, and the task fails to start.
 
-## Example Task (default image)
+## Example Task (published image)
 
-The default image has no `agy` binary, so the task opts in to the runtime
-install and its Gateway allows `storage.googleapis.com` alongside the Gemini
-API. The Gateway adds the real API key outside the sandbox; the task only sees
-a placeholder. The Secret setup is described under "Injecting credentials" in
+Published images have no `agy` binary (see "Builds" below), so the task opts
+in to the runtime install and its Gateway allows `storage.googleapis.com`
+alongside the Gemini API. With a bundled build, drop `AGY_RUNTIME_INSTALL` and
+the `storage.googleapis.com` rule. The Gateway adds the real API key outside
+the sandbox; the task only sees a placeholder. The Secret setup is described under "Injecting credentials" in
 google/ax's `docs/manifests.md`.
 
 ```yaml
@@ -68,12 +69,13 @@ The answer is reported as the task's `status.outcome.output`.
 ## Interactive Use (`ax ssh`)
 
 An `ax ssh` session never runs the launcher, so it gets none of the setup
-`ax-harness` does. With the default image, install `agy` once per workspace;
-the image already puts `/workspace/.ax/bin` on `PATH`, so a copy installed by
-an earlier goal task is found as well:
+`ax-harness` does. A bundled build already has `agy` on `PATH`. With a
+runtime-install build, install `agy` once per workspace; the image puts
+`/workspace/.ax/bin` on `PATH` (after the system paths), so a copy installed
+by an earlier goal task is found as well:
 
 ```bash
-/usr/local/share/ax/install-agy.sh "" /workspace/.ax/bin
+/usr/local/share/ax/install-agy.sh "" /workspace/.ax/bin  # runtime-install builds only
 export SSL_CERT_FILE=/run/ate/egress-trust-bundle/trust-bundle.pem  # trust the egress gateway
 agy --settings='{"modelProvider":"gemini"}'                         # with GEMINI_API_KEY set
 ```
@@ -103,22 +105,33 @@ invokes `/usr/local/bin/ax-harness` with `/workspace` as the working directory
 platform's release URL and SHA-512 checksum. The only network request is the
 tarball download from `storage.googleapis.com`, and the checksum never comes
 from the same bucket as the binary. Versions that are not pinned (including
-`latest`) are rejected. To bump `agy`, add the new release's execution ID and
-the SHA-512 of each platform's tarball (computed from the downloaded files).
+`latest`) are rejected.
 
-## Runtime vs. Pre-Installed Builds
+The Dockerfile's `ARG AGY_VERSION` must equal `PINNED_VERSION` (CI checks
+this), and the image records it as `AGY_VERSION` and the
+`io.agentexecutor.agy.version` label. To bump `agy`, add the new release's
+execution ID and the SHA-512 of each platform's tarball (computed from the
+downloaded files), then update `PINNED_VERSION` and `ARG AGY_VERSION`.
 
-- **Default (`PREINSTALL_AGY=false`):** Ships Debian packages, `/usr/local/share/ax/install-agy.sh`, and `/usr/local/bin/ax-harness` (no `agy` binary bundled in the image). A task must opt in to runtime installation with `AGY_RUNTIME_INSTALL=true`, which installs the pinned `agy` into `/workspace/.ax/bin` (so a resumed sandbox reuses it) and needs egress to `storage.googleapis.com`. Without the opt-in, a missing `agy` fails the task with exit code `127`.
-- **Optional pre-installed build (`--build-arg PREINSTALL_AGY=true`):** Installs the pinned `agy` during `docker build` for local or airgapped E2E environments where internet egress is blocked.
+## Builds: Runtime Install vs. Bundled
+
+- **Runtime install (`PREINSTALL_AGY=false`, current default):** Ships Debian packages, `/usr/local/share/ax/install-agy.sh`, and `/usr/local/bin/ax-harness`, with no `agy` binary. A task must opt in with `AGY_RUNTIME_INSTALL=true`, which installs the pinned `agy` into `/workspace/.ax/bin` (so a resumed sandbox reuses it) and needs egress to `storage.googleapis.com`. Without the opt-in, a missing `agy` fails the task with exit code `127`.
+- **Bundled (`PREINSTALL_AGY=true`):** Installs the pinned `agy` into `/usr/local/bin` during `docker build`, so tasks need no extra egress and `ax ssh` sessions have `agy` right away. An `agy` in the image always wins over a runtime install left in the workspace.
+
+**Published images are always runtime-install for now:** `release.yaml` builds
+`antigravity` with `PREINSTALL_AGY=false` until shipping the `agy` binary in a
+public image is cleared (#15), whatever the Dockerfile's default is.
 
 ## Local Build & Test
 
 ```bash
 ./agents/antigravity/test_harness.sh
 
-# Default runtime-install image (no agy binary inside):
-docker build -t ax-antigravity:dev ./agents/antigravity
+# Runtime-install image (no agy binary inside):
+docker build --build-arg PREINSTALL_AGY=false -t ax-antigravity:runtime ./agents/antigravity
+./agents/antigravity/verify_image.sh ax-antigravity:runtime runtime
 
-# Optional pre-installed local build:
-docker build --build-arg PREINSTALL_AGY=true -t ax-antigravity:prebaked ./agents/antigravity
+# Bundled image (pinned agy inside):
+docker build --build-arg PREINSTALL_AGY=true -t ax-antigravity:bundled ./agents/antigravity
+./agents/antigravity/verify_image.sh ax-antigravity:bundled bundled
 ```

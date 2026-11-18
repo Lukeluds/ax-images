@@ -142,6 +142,24 @@ run_runtime AGY_RUNTIME_INSTALL=true >/dev/null
 test "$(cat "${FAKE_HOME}/installed_versions.txt")" = ""
 rm -rf "${TMP}/.ax"
 
+# 7f. An agy installed in the image wins over a leftover workspace copy.
+mkdir -p "${TMP}/sysbin" "${TMP}/.ax/bin"
+for where in sysbin .ax/bin; do
+  printf '#!/usr/bin/env bash\necho "%s"\n' "${where}" >"${TMP}/${where}/agy-shadow"
+  chmod +x "${TMP}/${where}/agy-shadow"
+done
+printf 'Reply with MOCK_OK.' >"${TMP}/goal.md"
+got_shadow="$(
+  cd "${TMP}"
+  env -u GEMINI_API_KEY -u AGY_ADC_AUTH -u AGY_INSTALL_DIR \
+    PATH="${TMP}/sysbin:${PATH}" \
+    AX_GOAL_FILE="${TMP}/goal.md" \
+    AGY_BIN="agy-shadow" \
+    "${DIR}/ax-harness"
+)"
+test "${got_shadow}" = "sysbin"
+rm -rf "${TMP}/.ax" "${TMP}/sysbin"
+
 # 7e. install-agy.sh refuses versions without a pinned checksum, before any
 #     download (the base URL points at a closed port).
 for v in latest 9.9.9; do

@@ -33,9 +33,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Empty uses the version pinned in install-agy.sh; any other value must also
-# be pinned there with its checksums.
-ARG AGY_VERSION=
+# The agy version this image installs, recorded in the image as AGY_VERSION
+# and a label. It must equal PINNED_VERSION in install-agy.sh (CI checks
+# this), so bump both together.
+ARG AGY_VERSION=1.5.10
 ARG PREINSTALL_AGY=false
 
 COPY install-agy.sh /usr/local/share/ax/install-agy.sh
@@ -45,13 +46,17 @@ RUN chmod 0755 /usr/local/share/ax/install-agy.sh \
         && agy --version; \
     fi
 
+LABEL io.agentexecutor.agy.version="${AGY_VERSION}"
+
 ENV AGY_CLI_DISABLE_AUTO_UPDATE=true \
     AGY_VERSION="${AGY_VERSION}"
 
 # ax-harness installs agy at runtime into <workspace>/.ax/bin. Putting the
 # default workspace's copy on PATH lets `ax ssh` sessions, which never run the
-# launcher, find it too. Tasks that change the workspace path don't get this.
-ENV PATH="/workspace/.ax/bin:${PATH}"
+# launcher, find it too. It goes last, so a leftover workspace copy never
+# shadows an agy installed in the image. Tasks that change the workspace path
+# don't get this.
+ENV PATH="${PATH}:/workspace/.ax/bin"
 
 COPY ax-harness /usr/local/bin/ax-harness
 RUN chmod 0755 /usr/local/bin/ax-harness
