@@ -119,15 +119,16 @@ env:
   # An entry's optional build_args are passed to docker buildx build as
   # --build-arg KEY=VALUE.
   #
-  # claude-code is intentionally excluded (paused; #12). antigravity is built
-  # with PREINSTALL_AGY=false so a published image never bundles the agy
-  # binary, whatever the Dockerfile's default is, until the licensing question
-  # in #15 is answered.
+  # claude-code and its test server mock-anthropic are intentionally excluded
+  # (paused; #12). antigravity is built with PREINSTALL_AGY=false so a
+  # published image never bundles the agy binary, whatever the Dockerfile's
+  # default is, until the licensing question in #15 is answered.
+  # mock-gemini-api is a fake Gemini API server for testing antigravity, not an
+  # agent image; the name says so.
   IMAGE_CATALOG: |
     [
       {"name": "antigravity", "context": "agents/antigravity", "build_args": {"PREINSTALL_AGY": "false"}},
-      {"name": "mock-anthropic", "context": "fakes/mock-anthropic"},
-      {"name": "mock-gemini", "context": "fakes/mock-gemini"}
+      {"name": "mock-gemini-api", "context": "fakes/mock-gemini"}
     ]
 
 jobs:
