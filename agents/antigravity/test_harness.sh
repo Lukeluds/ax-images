@@ -171,6 +171,16 @@ for v in latest 9.9.9; do
   test ! -e "${TMP}/never"
 done
 
+# 7g. install-agy.sh fails fast with a clear memory-limit hint when free space
+#     is below AGY_MIN_FREE_MB (without touching the network or creating dest).
+set +e
+space_err="$(AGY_MIN_FREE_MB=999999999 AGY_GCS_BASE_URL="http://127.0.0.1:9" "${DIR}/install-agy.sh" "" "${TMP}/never-space" 2>&1)"
+rc=$?
+set -e
+test "${rc}" -eq 1
+test ! -e "${TMP}/never-space"
+grep -q "spec.profile.resources.limits.memory" <<<"${space_err}"
+
 # 8. Empty goal file fails with exit code 2.
 : >"${TMP}/empty.md"
 set +e

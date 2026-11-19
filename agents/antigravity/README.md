@@ -122,6 +122,13 @@ downloaded files), then update `PINNED_VERSION` and `ARG AGY_VERSION`.
 `antigravity` with `PREINSTALL_AGY=false` until shipping the `agy` binary in a
 public image is cleared (#15), whatever the Dockerfile's default is.
 
+**Memory limits:** Runtime installation downloads a ~100 MB archive and unpacks
+a ~267 MB binary onto memory-backed sandbox volumes, which exceeds AX's default
+`512Mi` limit. Set `spec.profile.resources.limits.memory` to at least `2Gi`
+(`4Gi` recommended, as in the example above); `install-agy.sh` checks free
+space before downloading and fails fast if fewer than `450 MiB` (`AGY_MIN_FREE_MB`)
+are available.
+
 ## Local Build & Test
 
 ```bash

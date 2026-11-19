@@ -61,9 +61,29 @@ url="${GCS}/antigravity-cli/${version}-${execution_id}/${platform}/${tarball}"
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 
+# Fail fast with an actionable message before downloading if the temp or
+# destination volume lacks space (e.g., AX's default 512Mi memory-backed
+# workspace cannot hold the ~100 MB archive + ~267 MB agy binary).
+min_free_mb="${AGY_MIN_FREE_MB:-450}"
+check_free_space() {
+  local dir="$1"
+  while [[ ! -d "${dir}" && "${dir}" != "/" ]]; do
+    dir="$(dirname "${dir}")"
+  done
+  local avail_mb
+  avail_mb="$(df -Pm "${dir}" 2>/dev/null | awk 'NR == 2 { print $4 }' || true)"
+  if [[ "${avail_mb}" =~ ^[0-9]+$ && "${avail_mb}" -lt "${min_free_mb}" ]]; then
+    echo "install-agy: insufficient space in ${dir} (${avail_mb} MiB free, need at least ${min_free_mb} MiB for agy archive + binary); raise spec.profile.resources.limits.memory (recommended: 4Gi)" >&2
+    exit 1
+  fi
+}
+check_free_space "${tmp}"
+check_free_space "${dest}"
+
 curl -fsSL -o "${tmp}/agy.tar.gz" "${url}"
 echo "${sha512}  ${tmp}/agy.tar.gz" | sha512sum -c - >/dev/null
 tar -xzf "${tmp}/agy.tar.gz" -C "${tmp}" antigravity
+rm -f "${tmp}/agy.tar.gz"
 
 mkdir -p "${dest}"
 install -m 0755 "${tmp}/antigravity" "${dest}/agy"
