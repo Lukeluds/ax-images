@@ -40,7 +40,7 @@ run_case() {
   printf '%s' "${cfg}" >"${TMP}/config.json"
   (
     cd "${TMP}"
-    env -u GEMINI_API_KEY -u AGY_ADC_AUTH -u AX_OUTPUT_FILE -u AX_MCP_CONFIG_FILE "$@" \
+    env -u GEMINI_API_KEY -u AGY_ADC_AUTH -u AX_OUTPUT_FILE -u AX_MCP_CONFIG_FILE -u AX_SESSION_FILE -u AX_SESSION_HOME "$@" \
       AX_GOAL_FILE="${TMP}/goal.md" \
       AX_CONFIG_FILE="${TMP}/config.json" \
       AGY_BIN="${TMP}/fake-agy" \
@@ -266,5 +266,64 @@ run_case '{}' AX_MCP_CONFIG_FILE="${TMP}/mcp-bad.json" >/dev/null 2>&1
 rc=$?
 set -e
 test "${rc}" -ne 0
+
+# 15. AX_SESSION_FILE isolates HOME under <workspace>/.ax/sessions/<id> and
+#     omits --continue on Turn 1, then passes --continue once conversation
+#     state exists in that session directory.
+cat >"${TMP}/home-agy" <<'EOF'
+#!/usr/bin/env python3
+import json, os, sys
+print(json.dumps({"home": os.environ.get("HOME"), "args": sys.argv[1:]}))
+EOF
+chmod +x "${TMP}/home-agy"
+printf 'sess-42\n' >"${TMP}/session-id"
+turn1="$(
+  cd "${TMP}"
+  env -u GEMINI_API_KEY -u AGY_ADC_AUTH -u AX_OUTPUT_FILE -u AX_MCP_CONFIG_FILE -u AX_SESSION_HOME \
+    AX_GOAL_FILE="${TMP}/goal.md" \
+    AX_SESSION_FILE="${TMP}/session-id" \
+    AGY_BIN="${TMP}/home-agy" \
+    "${DIR}/ax-harness"
+)"
+check_eq "session-turn-1" "${turn1}" \
+  "{\"home\":\"${TMP}/.ax/sessions/sess-42\",\"args\":[\"--add-dir=${TMP}\",\"--dangerously-skip-permissions\",\"--print=Reply with MOCK_OK.\"]}"
+
+mkdir -p "${TMP}/.ax/sessions/sess-42/.gemini/antigravity-cli/conversations"
+touch "${TMP}/.ax/sessions/sess-42/.gemini/antigravity-cli/conversations/conv.db"
+turn2="$(
+  cd "${TMP}"
+  env -u GEMINI_API_KEY -u AGY_ADC_AUTH -u AX_OUTPUT_FILE -u AX_MCP_CONFIG_FILE -u AX_SESSION_HOME \
+    AX_GOAL_FILE="${TMP}/goal.md" \
+    AX_SESSION_FILE="${TMP}/session-id" \
+    AGY_BIN="${TMP}/home-agy" \
+    "${DIR}/ax-harness"
+)"
+check_eq "session-turn-2" "${turn2}" \
+  "{\"home\":\"${TMP}/.ax/sessions/sess-42\",\"args\":[\"--add-dir=${TMP}\",\"--continue\",\"--dangerously-skip-permissions\",\"--print=Reply with MOCK_OK.\"]}"
+
+# 16. Explicit continue:false or conversation in spec.config is not overridden.
+check_eq "session-explicit-no-continue" \
+  "$(run_case '{"continue":false}' AX_SESSION_FILE="${TMP}/session-id")" \
+  "[\"--add-dir=${TMP}\", \"--continue=false\", \"--dangerously-skip-permissions\", \"--print=Reply with MOCK_OK.\"]"
+check_eq "session-explicit-conversation" \
+  "$(run_case '{"conversation":"conv-99"}' AX_SESSION_FILE="${TMP}/session-id")" \
+  "[\"--add-dir=${TMP}\", \"--conversation=conv-99\", \"--dangerously-skip-permissions\", \"--print=Reply with MOCK_OK.\"]"
+
+# 17. Invalid session IDs (e.g. path traversal) are rejected with exit code 2.
+for bad in "../escape" "a/b" ".."; do
+  printf '%s' "${bad}" >"${TMP}/bad-session"
+  set +e
+  run_case '{}' AX_SESSION_FILE="${TMP}/bad-session" >/dev/null 2>&1
+  rc=$?
+  set -e
+  test "${rc}" -eq 2
+done
+
+# 18. Same path in AX_OUTPUT_FILE and spec.config.outputFile writes atomically
+#     without duplicate-temp errors or leftover .tmp files.
+rm -rf "${TMP}/ws"
+run_case '{"outputFile":"ws/.ax/output"}' AX_OUTPUT_FILE="ws/.ax/output" >/dev/null
+check_eq "ax-output dedup" "$(cat "${TMP}/ws/.ax/output")" "${DEFAULT_ARGS}"
+test -z "$(find "${TMP}/ws/.ax" -name '*.tmp.*')"
 
 echo "ALL AX-HARNESS TESTS PASSED"

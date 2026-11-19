@@ -91,8 +91,8 @@ invokes `/usr/local/bin/ax-harness` with `/workspace` as the working directory
   - `outputFile` — Optional extra path where `agy`'s answer is also written.
   - `settings` — Merged into `--settings=<JSON>`.
 - `AX_MCP_CONFIG_FILE` *(optional)* — Path to the Workspace's MCP servers (`{"mcpServers": {...}}`). Each `http` (`url`) or `stdio` (`command` + `args`) server is registered with `agy mcp add` before the task runs; a malformed file fails the task.
-- `AX_OUTPUT_FILE` *(optional)* — Path where `agy`'s final answer is written (AX reports it as `status.outcome.output`). The answer is always printed to stdout/logs as well, and `ax-harness` exits with `agy`'s exit code.
-- `AX_SESSION_FILE` — Not used yet: AX's `spec.session_id` does not map to an `agy` conversation ID (`--conversation`).
+- `AX_OUTPUT_FILE` *(optional)* — Path where `agy`'s final answer is written atomically on exit (AX reports it as `status.outcome.output`). The answer is always printed to stdout/logs as well, and `ax-harness` exits with `agy`'s exit code.
+- `AX_SESSION_FILE` *(optional)* — Path to `spec.sessionId`. When non-empty, `ax-harness` isolates `HOME` under `<workspace>/.ax/sessions/<sessionId>` (overridable via `AX_SESSION_HOME`) on the durable workspace volume so conversation state survives suspend/resume, and passes `--continue` when resuming an existing conversation in that session (unless `spec.config` already sets `continue` or `conversation`).
 - **Defaults:** `--dangerously-skip-permissions` (headless runs cannot answer interactive prompts) and `--add-dir=<cwd>` (so relative file-tool paths resolve inside `/workspace`).
 - **Authentication:**
   - When `GEMINI_API_KEY` is set (and `AGY_ADC_AUTH` is unset), `ax-harness` automatically sets `"modelProvider": "gemini"` in `--settings`; `GOOGLE_GEMINI_BASE_URL` optionally points requests at a gateway or mock endpoint.

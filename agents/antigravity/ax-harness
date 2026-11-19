@@ -24,11 +24,17 @@
 #   AX_MCP_CONFIG_FILE  optional path to the Workspace's MCP servers as
 #                       {"mcpServers": {...}}; each is registered with
 #                       `agy mcp add` before the task runs
+#   AX_SESSION_FILE     optional path to spec.sessionId; when non-empty, HOME
+#                       is isolated under <workspace>/.ax/sessions/<sessionId>
+#                       so conversation state survives suspend/resume and
+#                       follow-up turns resume with --continue
 #   AX_OUTPUT_FILE      optional path the agent's final answer is written to
 #                       (AX reports it as status.outcome.output)
 #   cwd                 the task's workspace
 #
 # Optional environment variables:
+#   AX_SESSION_HOME      override the session HOME directory when AX_SESSION_FILE
+#                        is set (default: <workspace>/.ax/sessions/<sessionId>)
 #   AGY_RUNTIME_INSTALL  "true" to install agy at startup when the image does
 #                        not include it (needs egress to storage.googleapis.com)
 #   AGY_VERSION          version installed at runtime; must be pinned in
@@ -49,7 +55,30 @@ if [[ ! -s "${goal_file}" ]]; then
   exit 2
 fi
 
-export HOME="${HOME:-/root}"
+session_file="${AX_SESSION_FILE:-}"
+session_id=""
+if [[ -n "${session_file}" && -s "${session_file}" ]]; then
+  session_id="$(tr -d '\r\n' < "${session_file}")"
+fi
+
+# When a session ID is present, keep HOME under the durable workspace so agy's
+# conversation store survives suspend/resume and is shared across turns of the
+# same session.
+resume_session="false"
+if [[ -n "${session_id}" ]]; then
+  if [[ ! "${session_id}" =~ ^[A-Za-z0-9._-]+$ || "${session_id}" == "." || "${session_id}" == ".." ]]; then
+    echo "ax-harness: invalid session ID ${session_id:?} in ${session_file}" >&2
+    exit 2
+  fi
+  export HOME="${AX_SESSION_HOME:-${PWD}/.ax/sessions/${session_id}}"
+  mkdir -p "${HOME}"
+  if [[ -d "${HOME}/.gemini/antigravity-cli/conversations" ]] && \
+     [[ -n "$(ls -A "${HOME}/.gemini/antigravity-cli/conversations" 2>/dev/null || true)" ]]; then
+    resume_session="true"
+  fi
+else
+  export HOME="${HOME:-/root}"
+fi
 install_dir="${AGY_INSTALL_DIR:-${PWD}/.ax/bin}"
 # Appended, so an agy installed in the image always wins over a leftover
 # runtime install in the workspace.
@@ -128,13 +157,13 @@ PY
 fi
 
 # Prints outputFile (empty string when unset), followed by NUL-delimited agy args.
-mapfile -d '' -t parsed < <(python3 - "${config_file}" "${goal_file}" "${PWD}" <<'PY'
+mapfile -d '' -t parsed < <(python3 - "${config_file}" "${goal_file}" "${resume_session}" "${PWD}" <<'PY'
 import json
 import os
 import re
 import sys
 
-cfg_path, goal_path, cwd = sys.argv[1], sys.argv[2], sys.argv[3]
+cfg_path, goal_path, resume_session, cwd = sys.argv[1:5]
 cfg = {}
 if cfg_path:
     with open(cfg_path, "r", encoding="utf-8") as f:
@@ -163,6 +192,8 @@ if os.environ.get("GEMINI_API_KEY") and not adc:
 
 cfg.setdefault("dangerouslySkipPermissions", True)
 cfg.setdefault("addDir", [cwd])
+if resume_session == "true" and "continue" not in cfg and "conversation" not in cfg:
+    cfg["continue"] = True
 
 out = []
 for key in sorted(cfg):
@@ -192,17 +223,32 @@ for item in [output_file] + out:
     sys.stdout.buffer.write(item.encode("utf-8") + b"\0")
 PY
 )
+wait "$!"
 
 agy_args=("${parsed[@]:1}")
 
 # The answer goes to stdout (logs), to AX_OUTPUT_FILE for AX, and to
-# spec.config.outputFile when set.
+# spec.config.outputFile when set. Write via per-PID temp files and rename on
+# exit so callers polling AX_OUTPUT_FILE never read a partial answer.
 outputs=()
+tmp_outputs=()
 for f in "${AX_OUTPUT_FILE:-}" "${parsed[0]}"; do
-  if [[ -n "${f}" ]]; then
-    mkdir -p "$(dirname "${f}")"
-    outputs+=("${f}")
+  if [[ -z "${f}" ]]; then
+    continue
   fi
+  dup=false
+  for existing in "${outputs[@]:-}"; do
+    if [[ "${existing}" == "${f}" ]]; then
+      dup=true
+      break
+    fi
+  done
+  if [[ "${dup}" == "true" ]]; then
+    continue
+  fi
+  mkdir -p "$(dirname "${f}")"
+  outputs+=("${f}")
+  tmp_outputs+=("${f}.tmp.$$")
 done
 
 if [[ "${#outputs[@]}" -eq 0 ]]; then
@@ -210,7 +256,10 @@ if [[ "${#outputs[@]}" -eq 0 ]]; then
 fi
 
 set +e
-"${AGY_BIN}" "${agy_args[@]}" | tee "${outputs[@]}"
+"${AGY_BIN}" "${agy_args[@]}" | tee "${tmp_outputs[@]}"
 status="${PIPESTATUS[0]}"
 set -e
+for i in "${!outputs[@]}"; do
+  mv -f "${tmp_outputs[$i]}" "${outputs[$i]}"
+done
 exit "${status}"
